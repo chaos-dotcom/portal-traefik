@@ -12,6 +12,9 @@ RUN npm run build
 
 # ---- rust build ------------------------------------------------------------------------------
 FROM rust:1.98-slim AS rust-build
+# Some crates (via webauthn/x509) link OpenSSL, so the builder needs pkg-config + headers.
+RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY apps/api-rs/Cargo.toml apps/api-rs/Cargo.lock ./
 COPY apps/api-rs/src ./src
@@ -48,8 +51,8 @@ COPY --from=web-build /web/build /app/web/build
 
 COPY docker/container/rust/Caddyfile /etc/caddy/Caddyfile
 COPY docker/container/rust/supervisord.conf /etc/supervisor/supervisord.conf
-COPY docker/container/rust/portal-entrypoint.sh docker/container/rust/portal-start-api.sh /usr/local/bin/
-RUN chmod +x /usr/local/bin/portal-entrypoint.sh /usr/local/bin/portal-start-api.sh
+COPY docker/container/rust/portal-entrypoint.sh docker/container/rust/portal-start-api.sh docker/container/rust/portal-start-worker.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/portal-entrypoint.sh /usr/local/bin/portal-start-api.sh /usr/local/bin/portal-start-worker.sh
 
 VOLUME ["/data"]
 EXPOSE 80
