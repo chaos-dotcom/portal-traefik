@@ -1,6 +1,7 @@
 
 mod auth;
 mod config;
+mod crypto;
 mod error;
 mod routes;
 mod services;
@@ -43,10 +44,13 @@ async fn main() -> anyhow::Result<()> {
     .await?;
 
     let addr = format!("{}:{}", settings.host, settings.port);
+    let settings = Arc::new(settings);
+    let frameio = Arc::new(frameio::FrameioClient::new(db.clone(), settings.clone()));
     let state = AppState {
-        settings: Arc::new(settings),
+        settings,
         db,
         redis,
+        frameio,
     };
 
     // The API and the static SPA share one origin, so the browser's relative `fetch("/api/…")`
@@ -81,6 +85,23 @@ async fn main() -> anyhow::Result<()> {
         .route("/settings/email", get(routes::settings::email_status))
         .route("/settings/frameio-config", get(routes::settings::frameio_config_status))
         .route("/frameio/status", get(routes::account::frameio_status))
+        .route("/frameio/oauth/connect", get(routes::frameio::connect))
+        .route("/frameio/oauth/callback", get(routes::frameio::callback))
+        .route("/frameio/disconnect", post(routes::frameio::disconnect))
+        .route("/frameio/accounts", get(routes::frameio::list_accounts))
+        .route("/frameio/workspaces", get(routes::frameio::list_workspaces))
+        .route("/frameio/projects", get(routes::frameio::list_projects).post(routes::frameio::create_project))
+        .route("/frameio/projects/{project_id}", axum::routing::delete(routes::frameio::delete_project))
+        .route("/frameio/folders", get(routes::frameio::list_folders).post(routes::frameio::create_folder))
+        .route("/frameio/folders/{folder_id}", axum::routing::delete(routes::frameio::delete_folder))
+        .route("/frameio/folders/{folder_id}/move", axum::routing::patch(routes::frameio::move_folder))
+        .route("/frameio/folders/{folder_id}/copy", post(routes::frameio::copy_folder))
+        .route("/frameio/files", get(routes::frameio::list_files))
+        .route("/frameio/files/{file_id}", axum::routing::delete(routes::frameio::delete_file))
+        .route("/frameio/files/{file_id}/download-url", get(routes::frameio::file_download_url))
+        .route("/frameio/files/{file_id}/move", axum::routing::patch(routes::frameio::move_file))
+        .route("/frameio/files/{file_id}/copy", post(routes::frameio::copy_file))
+        .route("/frameio/shares", post(routes::frameio::create_share))
         .fallback(error::not_found);
 
     // SvelteKit's static build. Unknown non-API paths serve index.html for client-side routing.

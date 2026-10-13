@@ -47,11 +47,13 @@ impl SessionState {
         self.modified = true;
         self.data.insert(key.to_string(), value);
     }
-    #[allow(dead_code)] // used by logout and the TOTP gate
-    pub fn remove(&mut self, key: &str) {
+    /// Remove a key, returning its previous value (Python's `session.pop(key)` semantics).
+    pub fn remove(&mut self, key: &str) -> Option<Value> {
         self.accessed = true;
-        self.modified = true;
-        self.data.remove(key);
+        if self.data.contains_key(key) {
+            self.modified = true;
+        }
+        self.data.remove(key)
     }
 }
 

@@ -2,6 +2,7 @@ pub mod account;
 pub mod activity;
 pub mod branding;
 pub mod dashboard;
+pub mod frameio;
 pub mod destinations;
 pub mod download_links;
 pub mod guarded;

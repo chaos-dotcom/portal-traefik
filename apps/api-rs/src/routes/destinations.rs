@@ -140,7 +140,7 @@ pub async fn get_destination(State(state): State<AppState>, _: Admin, Path(id): 
     };
     // Lazily backfill/refresh the cached breadcrumb (best-effort; never fails the request).
     let config: Value = dest.get("config");
-    if let Some(refreshed) = refresh_config_path(&config).await {
+    if let Some(refreshed) = refresh_config_path(&state, &config).await {
         let _ = sqlx::query("UPDATE destinations SET config = $1 WHERE id = $2")
             .bind(&refreshed)
             .bind(id)
@@ -216,7 +216,7 @@ pub async fn create_destination(
     let project_id = config.get("project_id").and_then(|v| v.as_str()).unwrap_or("");
 
     // Validate the picked folder against Frame.io (the client seam reports NotConnected today).
-    let folder = match crate::frameio::get_frameio_client().get_folder(account_id, folder_id).await {
+    let folder = match state.frameio.get_folder(account_id, folder_id).await {
         Ok(f) => f,
         Err(crate::frameio::FrameioError::NotConnected) => {
             return detail(StatusCode::CONFLICT, "Frame.io is not connected")
@@ -240,7 +240,7 @@ pub async fn create_destination(
     let project_name = if project_name.is_empty() { None } else { Some(project_name) };
     if let Some(p) = &path {
         stored = stamp_path(&stored, p, project_name.as_deref());
-    } else if let Some((p, pn)) = resolve_folder_path(account_id, project_id, folder_id).await {
+    } else if let Some((p, pn)) = resolve_folder_path(&state, account_id, project_id, folder_id).await {
         // Non-UI callers don't know the breadcrumb; resolve it best-effort (display-only).
         stored = stamp_path(&stored, &p, pn.as_deref());
     }

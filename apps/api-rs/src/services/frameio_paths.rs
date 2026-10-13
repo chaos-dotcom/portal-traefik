@@ -6,7 +6,8 @@
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 
-use crate::frameio::{get_frameio_client, FrameioError};
+use crate::frameio::FrameioError;
+use crate::state::AppState;
 
 pub const PATH_TTL_SECONDS: i64 = 3600;
 
@@ -67,11 +68,12 @@ pub fn stamp_path(config: &Value, path: &[Value], project_name: Option<&str>) ->
 
 /// Resolve breadcrumb + project name from Frame.io; None on any Frame.io error.
 pub async fn resolve_folder_path(
+    state: &AppState,
     account_id: &str,
     project_id: &str,
     folder_id: &str,
 ) -> Option<(Vec<Value>, Option<String>)> {
-    let client = get_frameio_client();
+    let client = &state.frameio;
     let ancestry = client.folder_ancestry(account_id, folder_id).await.ok()?;
     if ancestry.is_empty() {
         return None;
@@ -93,7 +95,7 @@ pub async fn resolve_folder_path(
 }
 
 /// Refreshed copy of a frameio config's breadcrumb; None when fresh or unresolvable.
-pub async fn refresh_config_path(config: &Value) -> Option<Value> {
+pub async fn refresh_config_path(state: &AppState, config: &Value) -> Option<Value> {
     if config.get("type").and_then(|v| v.as_str()) != Some("frameio") || path_is_fresh(config) {
         return None;
     }
@@ -103,7 +105,7 @@ pub async fn refresh_config_path(config: &Value) -> Option<Value> {
     else {
         return None;
     };
-    let (path, project_name) = resolve_folder_path(&account_id, &project_id, &folder_id).await?;
+    let (path, project_name) = resolve_folder_path(state, &account_id, &project_id, &folder_id).await?;
     Some(stamp_path(config, &path, project_name.as_deref()))
 }
 
