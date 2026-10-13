@@ -16,6 +16,20 @@ pub struct Settings {
     pub base_url: String,
     /// `FRAMEIO_SCOPES` — echoed back by `GET /api/frameio/status`.
     pub frameio_scopes: String,
+    /// `ADMIN_EMAIL` — the fallback notify address.
+    pub admin_email: String,
+    /// `FRAMEIO_REDIRECT_URI`, defaulting to `{base_url}/api/frameio/oauth/callback`.
+    pub frameio_redirect_uri: String,
+}
+
+impl Settings {
+    pub fn resolved_frameio_redirect_uri(&self) -> String {
+        if self.frameio_redirect_uri.is_empty() {
+            format!("{}/api/frameio/oauth/callback", self.base_url.trim_end_matches('/'))
+        } else {
+            self.frameio_redirect_uri.clone()
+        }
+    }
 }
 
 impl Settings {
@@ -45,6 +59,9 @@ impl Settings {
             frameio_scopes: std::env::var("FRAMEIO_SCOPES").unwrap_or_else(|_| {
                 "openid,AdobeID,email,profile,offline_access,additional_info.roles".to_string()
             }),
+            admin_email: std::env::var("ADMIN_EMAIL")
+                .unwrap_or_else(|_| "admin@example.com".to_string()),
+            frameio_redirect_uri: std::env::var("FRAMEIO_REDIRECT_URI").unwrap_or_default(),
         }
     }
 }

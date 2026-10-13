@@ -4,6 +4,7 @@ pub mod branding;
 pub mod dashboard;
 pub mod download_links;
 pub mod guarded;
+pub mod settings;
 pub mod sync_rules;
 pub mod upload_links;
 pub mod health;

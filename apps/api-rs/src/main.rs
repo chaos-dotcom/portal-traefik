@@ -68,6 +68,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/activity/actions", get(routes::activity::list_actions))
         .route("/activity/summary", get(routes::activity::summary))
         .route("/settings/security", get(routes::account::security_status))
+        .route("/settings/email", get(routes::settings::email_status))
+        .route("/settings/frameio-config", get(routes::settings::frameio_config_status))
         .route("/frameio/status", get(routes::account::frameio_status))
         .fallback(error::not_found);
 
