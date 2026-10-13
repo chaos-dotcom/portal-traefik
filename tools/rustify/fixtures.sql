@@ -10,6 +10,7 @@ VALUES ('00000000-0000-4000-8000-000000000001', 'Acme Post', '#ff8800', true,
         '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00');
 
 -- One destination with a cached Frame.io breadcrumb under config.path.
+DELETE FROM audit_log;
 DELETE FROM sync_jobs;
 DELETE FROM sync_rules;
 DELETE FROM download_events;
@@ -89,4 +90,12 @@ VALUES ('00000000-0000-4000-8000-000000000501', '00000000-0000-4000-8000-0000000
         'asset-1', 'done', 1073741824, NULL, NULL, 0,
         '2026-02-06T08:00:00+00:00', '2026-02-06T08:20:00+00:00',
         '2026-02-06T08:00:00+00:00', '2026-02-06T08:20:00+00:00', NULL);
+-- Audit log rows for the activity view (one with a user, one without).
+INSERT INTO audit_log (id, user_id, action, detail, created_at)
+VALUES ('00000000-0000-4000-8000-000000000600',
+        (SELECT id FROM users ORDER BY created_at LIMIT 1),
+        'upload_link.created', '{"upload_link_id":"00000000-0000-4000-8000-000000000100"}'::jsonb,
+        '2026-02-01T10:00:00+00:00'),
+       ('00000000-0000-4000-8000-000000000601', NULL, 'webhook.received', NULL,
+        '2026-02-07T12:00:00+00:00');
 COMMIT;

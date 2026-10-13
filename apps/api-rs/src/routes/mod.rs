@@ -1,4 +1,5 @@
 pub mod account;
+pub mod activity;
 pub mod branding;
 pub mod dashboard;
 pub mod download_links;

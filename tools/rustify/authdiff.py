@@ -20,6 +20,11 @@ DEFAULT_PATHS = [
     "/api/dashboard/transfers?limit=15",
     "/api/frameio/status",
     "/api/settings/security",
+    "/api/sync-rules",
+    "/api/dashboard/history",
+    "/api/activity",
+    "/api/activity/actions",
+    "/api/activity/summary",
 ]
 
 

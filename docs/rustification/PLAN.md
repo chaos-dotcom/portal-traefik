@@ -43,14 +43,15 @@ Everything else must match byte for byte.
 | Email/notify, verify (OTP by email) | port |
 | `seed.py` first-boot admin seed | port |
 
-**Out of scope (with reason)** — the SvelteKit web app (`apps/web`):
+**Frontend** — the SvelteKit web app (`apps/web`) is built to a **static SPA** (`adapter-static`,
+`fallback: index.html`, `ssr = false`) and **served by the Rust process** on the same origin as
+`/api/*`. This removes Node from the runtime: the same Rust server answers the API and returns
+SvelteKit's own built HTML/JS/CSS byte-for-byte from disk. The route loads are universal (they
+call the API with relative `fetch`), so SvelteKit's compiler output is untouched — Rust is a file
+server for it, which is the only way "byte-for-byte" can apply to HTML.
 
-- It is a *client* of the API. Its SSR HTML is produced by Node running SvelteKit; reproducing
-  those bytes from Rust would mean reimplementing Svelte's compiler+runtime, which is neither a
-  Rust question nor a like-for-like comparison. The frontend stays as-is and talks to either
-  backend unchanged.
-- If the owner wants the frontend rewritten too, that is a separate objective (and cannot be
-  "byte-for-byte" against a Node-rendered target).
+The 19 `+page.server.ts`/`+layout.server.ts` files were converted to `+page.ts`/`+layout.ts`.
+Node remains a **build-time** tool only.
 
 **Container**: a Rust all-in-one image replaces the Python venv layer; Postgres/Redis/Node/Caddy
 stay. This is what makes image-size comparison meaningful.

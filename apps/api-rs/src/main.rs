@@ -3,6 +3,7 @@ mod auth;
 mod config;
 mod error;
 mod routes;
+mod seed;
 mod session;
 mod pyfmt;
 mod state;
@@ -27,6 +28,12 @@ async fn main() -> anyhow::Result<()> {
         .max_connections(10)
         .connect(&settings.database_url)
         .await?;
+
+    // `portal-api seed` — one-shot admin seed, run once by the container entrypoint.
+    if std::env::args().nth(1).as_deref() == Some("seed") {
+        seed::seed_admin(&db).await?;
+        return Ok(());
+    }
     let redis = redis::aio::ConnectionManager::new(
         redis::Client::open(settings.redis_url.clone())?,
     )
@@ -57,6 +64,9 @@ async fn main() -> anyhow::Result<()> {
         .route("/privacy/subject", get(routes::guarded::privacy_subject))
         .route("/dashboard/history", get(routes::dashboard::history))
         .route("/sync-rules", get(routes::sync_rules::list_rules))
+        .route("/activity", get(routes::activity::list_activity))
+        .route("/activity/actions", get(routes::activity::list_actions))
+        .route("/activity/summary", get(routes::activity::summary))
         .route("/settings/security", get(routes::account::security_status))
         .route("/frameio/status", get(routes::account::frameio_status))
         .fallback(error::not_found);
