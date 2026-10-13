@@ -21,6 +21,100 @@ pub struct TransfersQuery {
     limit: Option<i64>,
 }
 
+#[derive(Deserialize)]
+pub struct HistoryQuery {
+    kind: Option<String>,
+    limit: Option<i64>,
+    offset: Option<i64>,
+}
+
+/// `GET /api/dashboard/history` — paginated merge of completed uploads and file downloads.
+pub async fn history(State(state): State<AppState>, _: Admin, Query(q): Query<HistoryQuery>) -> Response {
+    let limit = q.limit.unwrap_or(50).clamp(1, 200);
+    let offset = q.offset.unwrap_or(0).max(0);
+    let kind = q.kind.unwrap_or_else(|| "all".to_string());
+    let want_upload = kind == "all" || kind == "upload";
+    let want_download = kind == "all" || kind == "download";
+    let take = offset + limit + 1;
+    let mut pool: Vec<(DateTime<Utc>, Value)> = Vec::new();
+
+    if want_upload {
+        let rows = sqlx::query(
+            "SELECT s.id, s.uploader_name, s.uploader_email, s.uploaded_bytes, s.total_bytes,
+                    s.status, s.started_at, s.completed_at, s.last_activity_at, s.created_at,
+                    s.frameio_asset_ids, l.brand_display_name
+               FROM upload_sessions s JOIN upload_links l ON s.upload_link_id = l.id
+              WHERE s.status = 'completed'
+                 OR (s.status = 'abandoned' AND s.frameio_asset_ids IS NOT NULL
+                     AND jsonb_array_length(s.frameio_asset_ids) > 0)
+              ORDER BY COALESCE(s.completed_at, s.last_activity_at, s.started_at, s.created_at) DESC
+              LIMIT $1",
+        )
+        .bind(take)
+        .fetch_all(&state.db)
+        .await
+        .unwrap_or_default();
+        for row in &rows {
+            let ids: Option<Value> = row.get("frameio_asset_ids");
+            let status: String = row.get("status");
+            let completed = status == "completed";
+            let total: Option<i64> = row.get("total_bytes");
+            let uploaded: Option<i64> = row.get("uploaded_bytes");
+            let at = row
+                .get::<Option<DateTime<Utc>>, _>("completed_at")
+                .or_else(|| row.get::<Option<DateTime<Utc>>, _>("last_activity_at"))
+                .or_else(|| row.get::<Option<DateTime<Utc>>, _>("started_at"))
+                .unwrap_or_else(|| at_of(row, "created_at"));
+            let size = if completed { total } else { uploaded.or_else(|| planned_bytes(&ids)) };
+            let brand: Option<String> = row.get("brand_display_name");
+            pool.push((at, json!({
+                "id": row.get::<uuid::Uuid, _>("id").to_string(),
+                "kind": "upload",
+                "label": brand.unwrap_or_else(|| "Upload".to_string()),
+                "who": who(row.get("uploader_name"), row.get("uploader_email")),
+                "bytes": size,
+                "status": if completed { "completed" } else { "incomplete" },
+                "at": crate::pyfmt::iso(&at),
+            })));
+        }
+    }
+    if want_download {
+        let rows = sqlx::query(
+            "SELECT e.id, e.file_name, e.bytes_served, e.completed, e.started_at, ds.viewer_email
+               FROM download_events e JOIN download_sessions ds ON e.download_session_id = ds.id
+              ORDER BY e.started_at DESC LIMIT $1",
+        )
+        .bind(take)
+        .fetch_all(&state.db)
+        .await
+        .unwrap_or_default();
+        for row in &rows {
+            let at: DateTime<Utc> = row.get("started_at");
+            let completed: bool = row.get("completed");
+            pool.push((at, json!({
+                "id": row.get::<uuid::Uuid, _>("id").to_string(),
+                "kind": "download",
+                "label": row.get::<Option<String>, _>("file_name").unwrap_or_else(|| "Download".to_string()),
+                "who": row.get::<Option<String>, _>("viewer_email"),
+                "bytes": row.get::<Option<i64>, _>("bytes_served"),
+                "status": if completed { "completed" } else { "in_progress" },
+                "at": crate::pyfmt::iso(&at),
+            })));
+        }
+    }
+
+    pool.sort_by(|a, b| b.0.cmp(&a.0));
+    let window: Vec<Value> = pool
+        .into_iter()
+        .skip(offset as usize)
+        .take((limit + 1) as usize)
+        .map(|(_, v)| v)
+        .collect();
+    let has_more = window.len() as i64 > limit;
+    let items: Vec<Value> = window.into_iter().take(limit as usize).collect();
+    Json(json!({ "items": items, "has_more": has_more })).into_response()
+}
+
 fn planned_bytes(ids: &Option<Value>) -> Option<i64> {
     let arr = ids.as_ref()?.as_array()?;
     let total: i64 = arr

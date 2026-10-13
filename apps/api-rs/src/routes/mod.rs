@@ -3,6 +3,7 @@ pub mod branding;
 pub mod dashboard;
 pub mod download_links;
 pub mod guarded;
+pub mod sync_rules;
 pub mod upload_links;
 pub mod health;
 pub mod public;
