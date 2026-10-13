@@ -23,6 +23,3 @@ pub async fn privacy_subject(_: Admin) -> Response {
 pub async fn settings_security(_: Admin) -> Response {
     not_ported()
 }
-pub async fn frameio_status(_: Admin) -> Response {
-    not_ported()
-}

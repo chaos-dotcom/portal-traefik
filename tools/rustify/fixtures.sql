@@ -10,6 +10,7 @@ VALUES ('00000000-0000-4000-8000-000000000001', 'Acme Post', '#ff8800', true,
         '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00');
 
 -- One destination with a cached Frame.io breadcrumb under config.path.
+DELETE FROM download_links;
 DELETE FROM upload_links;
 DELETE FROM destinations;
 DELETE FROM frameio_connections;
@@ -33,4 +34,13 @@ VALUES
   '2026-01-15T00:00:00+00:00', NULL, NULL, NULL, '{"name":false,"email":true,"message":false}'::jsonb,
   NULL, NULL, NULL, false, NULL, NULL, NULL,
   '2026-01-05T08:30:00+00:00', '2026-01-05T08:30:00+00:00');
+-- One download link (single-file source) so the download list has a deterministic row.
+INSERT INTO download_links (id, token, source, expires_at, password_hash, max_downloads,
+                            downloads_count, viewer_fields_required, revoked_at, allow_preview,
+                            brand_display_name, brand_subtitle, verify_email, created_at, updated_at)
+VALUES ('00000000-0000-4000-8000-000000000200', 'dl-fixed-token-cccccccccccccccc',
+        '{"type":"file","file_id":"file-fixed-1","name":"A001_C001.mxf"}'::jsonb,
+        NULL, NULL, 5, 2, '{"name":true,"email":true}'::jsonb, NULL, true,
+        'Acme Review', 'Watch the cut', false,
+        '2026-02-03T11:00:00+00:00', '2026-02-03T11:00:00+00:00');
 COMMIT;

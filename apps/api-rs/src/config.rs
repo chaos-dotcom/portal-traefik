@@ -14,6 +14,8 @@ pub struct Settings {
     pub session_cookie_secure: bool,
     /// Public base URL (`BASE_URL`), used to build link `public_url`s.
     pub base_url: String,
+    /// `FRAMEIO_SCOPES` — echoed back by `GET /api/frameio/status`.
+    pub frameio_scopes: String,
 }
 
 impl Settings {
@@ -40,6 +42,9 @@ impl Settings {
             session_cookie_secure,
             base_url: std::env::var("BASE_URL")
                 .unwrap_or_else(|_| "http://127.0.0.1:18080".to_string()),
+            frameio_scopes: std::env::var("FRAMEIO_SCOPES").unwrap_or_else(|_| {
+                "openid,AdobeID,email,profile,offline_access,additional_info.roles".to_string()
+            }),
         }
     }
 }

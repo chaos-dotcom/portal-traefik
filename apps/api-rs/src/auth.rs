@@ -51,8 +51,11 @@ where
     }
 }
 
-#[allow(dead_code)] // the uuid is used once authenticated bodies land
-pub struct Admin(pub Uuid);
+pub struct Admin {
+    #[allow(dead_code)]
+    pub id: Uuid,
+    pub email: String,
+}
 
 impl FromRequestParts<AppState> for Admin {
     type Rejection = Response;
@@ -67,13 +70,15 @@ impl FromRequestParts<AppState> for Admin {
         let Ok(id) = Uuid::parse_str(&uid) else {
             return Err(detail(StatusCode::UNAUTHORIZED, "Authentication required"));
         };
-        let row = sqlx::query_scalar::<_, Uuid>("SELECT id FROM users WHERE id = $1 AND is_active")
-            .bind(id)
-            .fetch_optional(&state.db)
-            .await
-            .map_err(|_| detail(StatusCode::UNAUTHORIZED, "Authentication required"))?;
+        let row = sqlx::query_as::<_, (Uuid, String)>(
+            "SELECT id, email FROM users WHERE id = $1 AND is_active",
+        )
+        .bind(id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|_| detail(StatusCode::UNAUTHORIZED, "Authentication required"))?;
         match row {
-            Some(id) => Ok(Admin(id)),
+            Some((id, email)) => Ok(Admin { id, email }),
             None => Err(detail(StatusCode::UNAUTHORIZED, "Authentication required")),
         }
     }

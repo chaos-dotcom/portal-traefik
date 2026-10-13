@@ -44,6 +44,8 @@ async fn main() -> anyhow::Result<()> {
     let api = Router::<AppState>::new()
         .route("/health", get(routes::health::health))
         .route("/auth/login", post(auth::login))
+        .route("/auth/me", get(routes::account::me))
+        .route("/download-links", get(routes::download_links::list_links))
         .route("/public/links/{token}", get(routes::public::resolve_link))
         .route(
             "/dashboard/transfers",
@@ -52,7 +54,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/upload-links", get(routes::upload_links::list_links))
         .route("/privacy/subject", get(routes::guarded::privacy_subject))
         .route("/settings/security", get(routes::guarded::settings_security))
-        .route("/frameio/status", get(routes::guarded::frameio_status))
+        .route("/frameio/status", get(routes::account::frameio_status))
         .fallback(error::not_found);
 
     // SvelteKit's static build; unknown non-API paths fall back to index.html for client routing.
