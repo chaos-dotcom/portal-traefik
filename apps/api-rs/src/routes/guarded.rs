@@ -17,6 +17,3 @@ fn not_ported() -> Response {
 pub async fn privacy_subject(_: Admin) -> Response {
     not_ported()
 }
-pub async fn settings_security(_: Admin) -> Response {
-    not_ported()
-}

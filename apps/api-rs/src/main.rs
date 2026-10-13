@@ -55,7 +55,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/upload-links/extension-preset", get(routes::upload_links::extension_preset))
         .route("/branding/logo", get(routes::branding::get_logo))
         .route("/privacy/subject", get(routes::guarded::privacy_subject))
-        .route("/settings/security", get(routes::guarded::settings_security))
+        .route("/settings/security", get(routes::account::security_status))
         .route("/frameio/status", get(routes::account::frameio_status))
         .fallback(error::not_found);
 

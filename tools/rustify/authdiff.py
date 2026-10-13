@@ -12,7 +12,15 @@ import httpx
 
 from matrix import VOLATILE_HEADERS
 
-DEFAULT_PATHS = ["/api/upload-links", "/api/dashboard/transfers"]
+DEFAULT_PATHS = [
+    "/api/auth/me",
+    "/api/upload-links",
+    "/api/upload-links/extension-preset",
+    "/api/download-links",
+    "/api/dashboard/transfers?limit=15",
+    "/api/frameio/status",
+    "/api/settings/security",
+]
 
 
 def login(base, email, pw):

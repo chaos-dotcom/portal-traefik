@@ -10,6 +10,7 @@ use serde_json::json;
 
 use crate::auth::Admin;
 use crate::state::AppState;
+use sqlx::Row;
 
 /// `REFRESH_SKEW_SECONDS` from `portal.frameio.connection`.
 const REFRESH_SKEW_SECONDS: i64 = 300;
@@ -53,4 +54,45 @@ pub async fn frameio_status(State(state): State<AppState>, admin: Admin) -> Resp
         }
     };
     Json(body).into_response()
+}
+
+/// `GET /api/settings/security` — TOTP flag + the account's registered passkeys.
+pub async fn security_status(State(state): State<AppState>, admin: Admin) -> Response {
+    let totp_enabled: Option<bool> =
+        sqlx::query_scalar("SELECT totp_enabled FROM users WHERE id = $1")
+            .bind(admin.id)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten();
+    let rows = sqlx::query(
+        "SELECT id, name, created_at, last_used_at FROM webauthn_credentials
+          WHERE user_id = $1 ORDER BY created_at",
+    )
+    .bind(admin.id)
+    .fetch_all(&state.db)
+    .await;
+    let rows = match rows {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!("security.status_failed: {e}");
+            return crate::error::detail(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal server error",
+            );
+        }
+    };
+    let passkeys: Vec<serde_json::Value> = rows
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "id": r.get::<uuid::Uuid, _>("id").to_string(),
+                "name": r.get::<Option<String>, _>("name"),
+                "created_at": crate::pyfmt::iso(&r.get::<DateTime<Utc>, _>("created_at")),
+                "last_used_at": r.get::<Option<DateTime<Utc>>, _>("last_used_at").map(|d| crate::pyfmt::iso(&d)),
+            })
+        })
+        .collect();
+    Json(json!({ "totp_enabled": totp_enabled.unwrap_or(false), "passkeys": passkeys }))
+        .into_response()
 }
