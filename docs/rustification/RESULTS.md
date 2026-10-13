@@ -78,7 +78,29 @@ Two honest caveats on the Python side of the health endpoint: `portal/routes/hea
 from a Redis connection storm. The like-for-like benchmark will normalise worker count and use
 endpoints that do no per-request connection setup.
 
-## 5. Status
+## 5. Ported surface (checkpoint 3)
+
+Byte-identical against the Python service, verified by `tools/rustify/{capture,diff}.py`
+(unauthenticated) and `tools/rustify/authdiff.py` (authenticated, per-service cookies):
+
+| Endpoint | Notes |
+|---|---|
+| `GET /api/health` | db + redis probe |
+| `POST /api/auth/login` | bcrypt verify, TOTP branch, session write |
+| `GET /api/auth/me` | |
+| `GET /api/upload-links` | list, JSONB + computed fields |
+| `GET /api/upload-links/extension-preset` | 26-extension preset |
+| `GET /api/download-links` | list |
+| `GET /api/dashboard/transfers` | merged upload/download/sync feed + sync health |
+| `GET /api/frameio/status` | connection state + needs_refresh |
+| `GET /api/branding/logo` | 404 when unset; ETag/Cache-Control/304 |
+| `GET /api/public/links/{token}` | full body for ok and expired links |
+| FastAPI's 404 + 401 shapes, `Vary: Cookie` | middleware/error layer |
+
+Session cookies interop byte-for-byte with the Python service. Not yet ported: the write
+endpoints, sync/upload/download engines, Frame.io client, TOTP/passkey writes, email.
+
+## 6. Status
 
 Ported: session middleware, `require_admin` 401 path, password login, health, public-link 404.
 Not ported: every authenticated body, TOTP/passkeys, upload/download engines, sync worker,
