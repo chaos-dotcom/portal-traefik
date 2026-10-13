@@ -13,3 +13,4 @@ pub mod upload_links;
 pub mod webhooks;
 pub mod health;
 pub mod public;
+pub mod public_downloads;

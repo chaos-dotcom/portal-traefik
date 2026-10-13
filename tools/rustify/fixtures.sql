@@ -45,7 +45,7 @@ INSERT INTO download_links (id, token, source, expires_at, password_hash, max_do
                             downloads_count, viewer_fields_required, revoked_at, allow_preview,
                             brand_display_name, brand_subtitle, verify_email, created_at, updated_at)
 VALUES ('00000000-0000-4000-8000-000000000200', 'dl-fixed-token-cccccccccccccccc',
-        '{"type":"file","file_id":"file-fixed-1","name":"A001_C001.mxf"}'::jsonb,
+        '{"type":"file","account_id":"acct-fixed","file_id":"file-fixed-1","name":"A001_C001.mxf"}'::jsonb,
         NULL, NULL, 5, 2, '{"name":true,"email":true}'::jsonb, NULL, true,
         'Acme Review', 'Watch the cut', false,
         '2026-02-03T11:00:00+00:00', '2026-02-03T11:00:00+00:00');

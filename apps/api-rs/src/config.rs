@@ -37,6 +37,25 @@ pub struct Settings {
     pub retention_sessions_days: i64,
     pub retention_audit_log_days: i64,
     pub upload_stale_after_minutes: i64,
+    // --- public-endpoint rate limiting, lockout and ingress ---
+    pub rate_limit_enabled: bool,
+    pub rate_limit_default_per_minute: i64,
+    pub rate_limit_strict_per_minute: i64,
+    pub password_lockout_max_failures: i64,
+    pub password_lockout_window_seconds: i64,
+    pub trusted_proxy_hops: usize,
+    // --- email verification ---
+    pub verify_code_ttl_seconds: i64,
+    pub verify_max_attempts: i32,
+    pub verify_resend_cooldown_seconds: i64,
+    pub verify_trust_days: i64,
+    pub verify_check_mx: bool,
+}
+
+fn env_bool(key: &str, default: bool) -> bool {
+    std::env::var(key)
+        .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
+        .unwrap_or(default)
 }
 
 fn env_i64(key: &str, default: i64) -> i64 {
@@ -99,6 +118,17 @@ impl Settings {
             retention_sessions_days: env_i64("RETENTION_SESSIONS_DAYS", 365),
             retention_audit_log_days: env_i64("RETENTION_AUDIT_LOG_DAYS", 0),
             upload_stale_after_minutes: env_i64("UPLOAD_STALE_AFTER_MINUTES", 30),
+            rate_limit_enabled: env_bool("RATE_LIMIT_ENABLED", true),
+            rate_limit_default_per_minute: env_i64("RATE_LIMIT_DEFAULT_PER_MINUTE", 120),
+            rate_limit_strict_per_minute: env_i64("RATE_LIMIT_STRICT_PER_MINUTE", 12),
+            password_lockout_max_failures: env_i64("PASSWORD_LOCKOUT_MAX_FAILURES", 30),
+            password_lockout_window_seconds: env_i64("PASSWORD_LOCKOUT_WINDOW_SECONDS", 900),
+            trusted_proxy_hops: env_i64("TRUSTED_PROXY_HOPS", 2).max(0) as usize,
+            verify_code_ttl_seconds: env_i64("VERIFY_CODE_TTL_SECONDS", 600),
+            verify_max_attempts: env_i64("VERIFY_MAX_ATTEMPTS", 5) as i32,
+            verify_resend_cooldown_seconds: env_i64("VERIFY_RESEND_COOLDOWN_SECONDS", 30),
+            verify_trust_days: env_i64("VERIFY_TRUST_DAYS", 30),
+            verify_check_mx: env_bool("VERIFY_CHECK_MX", true),
         }
     }
 }

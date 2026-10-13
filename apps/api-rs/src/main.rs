@@ -2,13 +2,17 @@
 mod auth;
 mod config;
 mod crypto;
+mod lib;
+mod notify;
 mod error;
 mod routes;
 mod services;
 mod seed;
+mod downloads;
 mod frameio;
 mod session;
 mod storage;
+mod verify;
 mod sync;
 mod spa;
 mod pyfmt;
@@ -75,6 +79,19 @@ async fn main() -> anyhow::Result<()> {
         .route("/download-links/{link_id}/events", get(routes::download_links::list_events))
         .route("/download-links/{link_id}/stats", get(routes::download_links::stats))
         .route("/public/links/{token}", get(routes::public::resolve_link))
+        .route("/public/links/{token}/request-code", post(routes::public::request_code))
+        .route("/public/links/{token}/verify-code", post(routes::public::verify_link_code))
+        .route("/public/links/{token}/verify-password", post(routes::public::verify_link_password))
+        .route("/public/links/{token}/sessions", post(routes::public::start_session))
+        .route("/public/links/{token}/sessions/{session_id}/files", post(routes::public::request_file_upload))
+        .route("/public/links/{token}/sessions/{session_id}/files/{file_id}/complete", post(routes::public::complete_file))
+        .route("/public/links/{token}/sessions/{session_id}/complete", post(routes::public::complete_session))
+        .route("/public/links/{token}/sessions/{session_id}/heartbeat", post(routes::public::session_heartbeat))
+        .route("/public/links/{token}/sessions/{session_id}/abandon", post(routes::public::abandon_session))
+        .route("/public/downloads/{token}", get(routes::public_downloads::resolve_link))
+        .route("/public/downloads/{token}/request-code", post(routes::public_downloads::request_code))
+        .route("/public/downloads/{token}/sessions", post(routes::public_downloads::start_session))
+        .route("/public/downloads/{token}/sessions/{session_id}/files/{file_id}/url", post(routes::public_downloads::file_download_url))
         .route(
             "/dashboard/transfers",
             get(routes::dashboard::transfers),
@@ -146,6 +163,6 @@ async fn main() -> anyhow::Result<()> {
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!("listening on {addr} (web dir: {web_dir})");
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>()).await?;
     Ok(())
 }

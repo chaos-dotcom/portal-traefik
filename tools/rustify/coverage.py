@@ -47,6 +47,16 @@ PORTED = {
     ("GET", "/api/sync-rules/{rule_id}/stats"), ("POST", "/api/sync-jobs/{job_id}/retry"),
     ("POST", "/api/sync-jobs/{job_id}/dismiss"), ("POST", "/api/webhooks/frameio/{rule_id}"),
     ("GET", "/api/webhook-events"),
+    ("POST", "/api/public/links/{token}/request-code"), ("POST", "/api/public/links/{token}/verify-code"),
+    ("POST", "/api/public/links/{token}/verify-password"), ("POST", "/api/public/links/{token}/sessions"),
+    ("POST", "/api/public/links/{token}/sessions/{session_id}/files"),
+    ("POST", "/api/public/links/{token}/sessions/{session_id}/files/{file_id}/complete"),
+    ("POST", "/api/public/links/{token}/sessions/{session_id}/complete"),
+    ("POST", "/api/public/links/{token}/sessions/{session_id}/heartbeat"),
+    ("POST", "/api/public/links/{token}/sessions/{session_id}/abandon"),
+    ("GET", "/api/public/downloads/{token}"), ("POST", "/api/public/downloads/{token}/request-code"),
+    ("POST", "/api/public/downloads/{token}/sessions"),
+    ("POST", "/api/public/downloads/{token}/sessions/{session_id}/files/{file_id}/url"),
 }
 PARTIAL = {("POST", "/api/destinations")}
 
