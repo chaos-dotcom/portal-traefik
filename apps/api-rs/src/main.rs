@@ -5,6 +5,7 @@ mod error;
 mod routes;
 mod seed;
 mod session;
+mod spa;
 mod pyfmt;
 mod state;
 
@@ -76,7 +77,8 @@ async fn main() -> anyhow::Result<()> {
     // SvelteKit's static build. Unknown non-API paths serve index.html for client-side routing.
     // NOTE: `not_found_service` would force a 404 status on the shell; `fallback` serves it 200.
     let web_dir = std::env::var("WEB_DIR").unwrap_or_else(|_| "web/build".to_string());
-    let static_service = ServeDir::new(&web_dir).fallback(ServeFile::new(format!("{web_dir}/index.html")));
+    let static_service =
+        ServeDir::new(&web_dir).fallback(ServeFile::new(format!("{web_dir}/index.html")));
 
     let app = Router::new()
         .nest("/api", api)

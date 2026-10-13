@@ -229,6 +229,11 @@ pub async fn session_middleware(
     let handle: SessionHandle = Arc::new(Mutex::new(session));
     req.extensions_mut().insert(handle.clone());
 
+    // SPA auth gate (SSR parity): guarded pages require a session before the shell is served.
+    if let Some(redirect) = crate::spa::maybe_redirect(&state, req.uri().path(), &handle).await {
+        return redirect;
+    }
+
     let mut response = next.run(req).await;
 
     let s = handle.lock().unwrap();
