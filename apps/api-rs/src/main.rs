@@ -4,6 +4,7 @@ mod config;
 mod error;
 mod routes;
 mod session;
+mod pyfmt;
 mod state;
 
 use std::sync::Arc;
@@ -12,6 +13,7 @@ use axum::routing::{get, post};
 use axum::Router;
 use config::Settings;
 use state::AppState;
+use tower_http::services::{ServeDir, ServeFile};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -37,28 +39,30 @@ async fn main() -> anyhow::Result<()> {
         redis,
     };
 
-    let app = Router::new()
-        .route("/api/health", get(routes::health::health))
-        .route("/api/auth/login", post(auth::login))
-        .route("/api/public/links/{token}", get(routes::public::resolve_link))
+    // The API and the static SPA share one origin, so the browser's relative `fetch("/api/…")`
+    // calls carry the session cookie with no proxy in between.
+    let api = Router::<AppState>::new()
+        .route("/health", get(routes::health::health))
+        .route("/auth/login", post(auth::login))
+        .route("/public/links/{token}", get(routes::public::resolve_link))
         .route(
-            "/api/dashboard/transfers",
+            "/dashboard/transfers",
             get(routes::guarded::dashboard_transfers),
         )
-        .route(
-            "/api/upload-links",
-            get(routes::guarded::upload_links_index),
-        )
-        .route(
-            "/api/privacy/subject",
-            get(routes::guarded::privacy_subject),
-        )
-        .route(
-            "/api/settings/security",
-            get(routes::guarded::settings_security),
-        )
-        .route("/api/frameio/status", get(routes::guarded::frameio_status))
-        .fallback(error::not_found)
+        .route("/upload-links", get(routes::upload_links::list_links))
+        .route("/privacy/subject", get(routes::guarded::privacy_subject))
+        .route("/settings/security", get(routes::guarded::settings_security))
+        .route("/frameio/status", get(routes::guarded::frameio_status))
+        .fallback(error::not_found);
+
+    // SvelteKit's static build; unknown non-API paths fall back to index.html for client routing.
+    let web_dir = std::env::var("WEB_DIR").unwrap_or_else(|_| "web/build".to_string());
+    let static_service = ServeDir::new(&web_dir)
+        .not_found_service(ServeFile::new(format!("{web_dir}/index.html")));
+
+    let app = Router::new()
+        .nest("/api", api)
+        .fallback_service(static_service)
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             session::session_middleware,
@@ -66,7 +70,7 @@ async fn main() -> anyhow::Result<()> {
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
-    tracing::info!("listening on {addr}");
+    tracing::info!("listening on {addr} (web dir: {web_dir})");
     axum::serve(listener, app).await?;
     Ok(())
 }

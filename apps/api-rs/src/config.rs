@@ -12,6 +12,8 @@ pub struct Settings {
     pub session_secret: String,
     /// `SESSION_COOKIE_SECURE` — adds `secure` to the Set-Cookie flags (default true).
     pub session_cookie_secure: bool,
+    /// Public base URL (`BASE_URL`), used to build link `public_url`s.
+    pub base_url: String,
 }
 
 impl Settings {
@@ -36,6 +38,8 @@ impl Settings {
             session_secret: std::env::var("SESSION_SECRET")
                 .unwrap_or_else(|_| "change-me-session-secret".to_string()),
             session_cookie_secure,
+            base_url: std::env::var("BASE_URL")
+                .unwrap_or_else(|_| "http://127.0.0.1:18080".to_string()),
         }
     }
 }

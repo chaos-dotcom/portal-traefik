@@ -17,9 +17,6 @@ fn not_ported() -> Response {
 pub async fn dashboard_transfers(_: Admin) -> Response {
     not_ported()
 }
-pub async fn upload_links_index(_: Admin) -> Response {
-    not_ported()
-}
 pub async fn privacy_subject(_: Admin) -> Response {
     not_ported()
 }
