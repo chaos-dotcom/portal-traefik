@@ -65,8 +65,11 @@ async fn main() -> anyhow::Result<()> {
             "/dashboard/transfers",
             get(routes::dashboard::transfers),
         )
-        .route("/upload-links", get(routes::upload_links::list_links))
         .route("/upload-links/extension-preset", get(routes::upload_links::extension_preset))
+        .route("/upload-links", get(routes::upload_links::list_links).post(routes::upload_links::create_link))
+        .route("/upload-links/{link_id}", get(routes::upload_links::get_link).patch(routes::upload_links::update_link).delete(routes::upload_links::delete_link))
+        .route("/upload-links/{link_id}/revoke", post(routes::upload_links::revoke_link))
+        .route("/upload-links/{link_id}/stats", get(routes::upload_links::stats))
         .route("/branding/logo", get(routes::branding::get_logo))
         .route("/privacy/subject", get(routes::guarded::privacy_subject))
         .route("/dashboard/history", get(routes::dashboard::history))

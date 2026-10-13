@@ -34,6 +34,9 @@ PORTED = {
     ("GET", "/api/activity/actions"), ("GET", "/api/activity/summary"), ("GET", "/api/branding/logo"),
     ("GET", "/api/destinations"), ("POST", "/api/destinations"), ("GET", "/api/destinations/{id}"),
     ("PATCH", "/api/destinations/{id}"), ("DELETE", "/api/destinations/{id}"),
+    ("POST", "/api/upload-links"), ("GET", "/api/upload-links/{link_id}"),
+    ("PATCH", "/api/upload-links/{link_id}"), ("DELETE", "/api/upload-links/{link_id}"),
+    ("POST", "/api/upload-links/{link_id}/revoke"), ("GET", "/api/upload-links/{link_id}/stats"),
 }
 PARTIAL = {("POST", "/api/destinations")}
 
