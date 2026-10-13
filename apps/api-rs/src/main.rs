@@ -59,7 +59,11 @@ async fn main() -> anyhow::Result<()> {
         .route("/health", get(routes::health::health))
         .route("/auth/login", post(auth::login))
         .route("/auth/me", get(routes::account::me))
-        .route("/download-links", get(routes::download_links::list_links))
+        .route("/download-links", get(routes::download_links::list_links).post(routes::download_links::create_link))
+        .route("/download-links/{link_id}", get(routes::download_links::get_link).patch(routes::download_links::update_link).delete(routes::download_links::delete_link))
+        .route("/download-links/{link_id}/revoke", post(routes::download_links::revoke_link))
+        .route("/download-links/{link_id}/events", get(routes::download_links::list_events))
+        .route("/download-links/{link_id}/stats", get(routes::download_links::stats))
         .route("/public/links/{token}", get(routes::public::resolve_link))
         .route(
             "/dashboard/transfers",
