@@ -12,6 +12,13 @@ use serde_json::{json, Value};
 use sqlx::Row;
 
 use crate::auth::Admin;
+
+/// `MEDIA_EXTENSIONS_PRESET` from `portal.uploads.links`.
+pub const MEDIA_EXTENSIONS_PRESET: [&str; 26] = [
+    "r3d", "braw", "ari", "arx", "mxf", "mov", "mp4", "mts", "m4v", "avi", "prores", "dng",
+    "cdng", "exr", "dpx", "tiff", "tif", "png", "jpg", "jpeg", "wav", "aif", "aiff", "mp3",
+    "bwf", "zip",
+];
 use crate::error::detail;
 use crate::state::AppState;
 
@@ -25,6 +32,10 @@ fn link_state(revoked_at: Option<DateTime<Utc>>, expires_at: Option<DateTime<Utc
         }
     }
     "ok"
+}
+
+pub async fn extension_preset(_: Admin) -> Response {
+    Json(serde_json::json!(MEDIA_EXTENSIONS_PRESET)).into_response()
 }
 
 pub async fn list_links(State(state): State<AppState>, _: Admin) -> Response {

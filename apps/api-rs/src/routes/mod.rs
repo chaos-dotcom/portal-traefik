@@ -1,4 +1,5 @@
 pub mod account;
+pub mod branding;
 pub mod dashboard;
 pub mod download_links;
 pub mod guarded;

@@ -52,6 +52,8 @@ async fn main() -> anyhow::Result<()> {
             get(routes::dashboard::transfers),
         )
         .route("/upload-links", get(routes::upload_links::list_links))
+        .route("/upload-links/extension-preset", get(routes::upload_links::extension_preset))
+        .route("/branding/logo", get(routes::branding::get_logo))
         .route("/privacy/subject", get(routes::guarded::privacy_subject))
         .route("/settings/security", get(routes::guarded::settings_security))
         .route("/frameio/status", get(routes::account::frameio_status))
