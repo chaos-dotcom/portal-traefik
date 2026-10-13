@@ -1,7 +1,6 @@
-import { apiFetch } from "$lib/server/api";
-import type { PageServerLoad } from "./$types";
-import type { UploadLink } from "./upload-links/+page.server";
-import type { DownloadLink } from "./download-links/+page.server";
+import type { PageLoad } from "./$types";
+import type { UploadLink } from "./upload-links/+page";
+import type { DownloadLink } from "./download-links/+page";
 
 export type ActiveUpload = {
   id: string;
@@ -42,13 +41,12 @@ const EMPTY: Transfers = {
   sync_health: { waiting: 0, running: 0, dead_letter: 0, done_24h: 0, dead_letter_rule_id: null },
 };
 
-export const load: PageServerLoad = async ({ request }) => {
-  const cookie = request.headers.get("cookie");
+export const load: PageLoad = async ({ fetch }) => {
   const [transfersRes, upRes, downRes, connRes] = await Promise.all([
-    apiFetch("/api/dashboard/transfers?limit=15", cookie),
-    apiFetch("/api/upload-links", cookie),
-    apiFetch("/api/download-links", cookie),
-    apiFetch("/api/frameio/status", cookie),
+    fetch("/api/dashboard/transfers?limit=15"),
+    fetch("/api/upload-links"),
+    fetch("/api/download-links"),
+    fetch("/api/frameio/status"),
   ]);
 
   const transfers: Transfers = transfersRes.ok ? await transfersRes.json() : EMPTY;

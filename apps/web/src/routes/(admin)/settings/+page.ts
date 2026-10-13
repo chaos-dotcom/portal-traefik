@@ -1,5 +1,4 @@
-import { apiFetch } from "$lib/server/api";
-import type { PageServerLoad } from "./$types";
+import type { PageLoad } from "./$types";
 
 export type EmailStatus = {
   configured: boolean;
@@ -42,14 +41,13 @@ export type BrandingStatus = {
   brand_accent_color: string | null;
 };
 
-export const load: PageServerLoad = async ({ request }) => {
-  const cookie = request.headers.get("cookie");
+export const load: PageLoad = async ({ fetch }) => {
   const [emailRes, frameioRes, frameioConfigRes, securityRes, brandingRes] = await Promise.all([
-    apiFetch("/api/settings/email", cookie),
-    apiFetch("/api/frameio/status", cookie),
-    apiFetch("/api/settings/frameio-config", cookie),
-    apiFetch("/api/settings/security", cookie),
-    apiFetch("/api/settings/branding", cookie),
+    fetch("/api/settings/email"),
+    fetch("/api/frameio/status"),
+    fetch("/api/settings/frameio-config"),
+    fetch("/api/settings/security"),
+    fetch("/api/settings/branding"),
   ]);
   const email: EmailStatus = emailRes.ok
     ? await emailRes.json()

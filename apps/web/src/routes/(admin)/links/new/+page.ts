@@ -1,12 +1,10 @@
-import { apiFetch } from "$lib/server/api";
-import type { PageServerLoad } from "./$types";
-import type { Destination } from "../../destinations/+page.server";
+import type { PageLoad } from "./$types";
+import type { Destination } from "../../destinations/+page";
 
-export const load: PageServerLoad = async ({ request }) => {
-  const cookie = request.headers.get("cookie");
+export const load: PageLoad = async ({ fetch }) => {
   const [destRes, presetRes] = await Promise.all([
-    apiFetch("/api/destinations", cookie),
-    apiFetch("/api/upload-links/extension-preset", cookie),
+    fetch("/api/destinations"),
+    fetch("/api/upload-links/extension-preset"),
   ]);
   const destinations: Destination[] = destRes.ok ? await destRes.json() : [];
   const extensionPreset: string[] = presetRes.ok ? await presetRes.json() : [];

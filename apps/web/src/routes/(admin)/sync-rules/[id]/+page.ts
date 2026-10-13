@@ -1,7 +1,6 @@
-import { apiFetch } from "$lib/server/api";
 import { error } from "@sveltejs/kit";
-import type { PageServerLoad } from "./$types";
-import type { SyncRule } from "../+page.server";
+import type { PageLoad } from "./$types";
+import type { SyncRule } from "../+page";
 
 export type SyncJob = {
   id: string;
@@ -16,12 +15,11 @@ export type SyncJob = {
   created_at: string;
 };
 
-export const load: PageServerLoad = async ({ params, request }) => {
-  const cookie = request.headers.get("cookie");
+export const load: PageLoad = async ({ params, fetch }) => {
   const [ruleRes, jobsRes, statsRes] = await Promise.all([
-    apiFetch(`/api/sync-rules/${params.id}`, cookie),
-    apiFetch(`/api/sync-rules/${params.id}/jobs`, cookie),
-    apiFetch(`/api/sync-rules/${params.id}/stats`, cookie),
+    fetch(`/api/sync-rules/${params.id}`),
+    fetch(`/api/sync-rules/${params.id}/jobs`),
+    fetch(`/api/sync-rules/${params.id}/stats`),
   ]);
   if (!ruleRes.ok) throw error(ruleRes.status === 404 ? 404 : 500, "Sync rule not found");
   const rule: SyncRule = await ruleRes.json();

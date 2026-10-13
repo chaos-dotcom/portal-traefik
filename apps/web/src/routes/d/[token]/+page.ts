@@ -1,6 +1,5 @@
-import { apiFetch } from "$lib/server/api";
 import { error } from "@sveltejs/kit";
-import type { PageServerLoad } from "./$types";
+import type { PageLoad } from "./$types";
 
 export type PublicDownload = {
   state: "ok" | "expired" | "revoked";
@@ -14,8 +13,8 @@ export type PublicDownload = {
   allow_preview: boolean;
 };
 
-export const load: PageServerLoad = async ({ params }) => {
-  const res = await apiFetch(`/api/public/downloads/${params.token}`, null);
+export const load: PageLoad = async ({ params, fetch }) => {
+  const res = await fetch(`/api/public/downloads/${params.token}`);
   if (res.status === 404) throw error(404, "This download link does not exist.");
   if (!res.ok) throw error(500, "Something went wrong.");
   const link: PublicDownload = await res.json();

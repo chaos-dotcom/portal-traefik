@@ -1,15 +1,13 @@
-import { apiFetch } from "$lib/server/api";
-import type { PageServerLoad } from "./$types";
-import type { UploadLink } from "../upload-links/+page.server";
-import type { DownloadLink } from "../download-links/+page.server";
+import type { PageLoad } from "./$types";
+import type { UploadLink } from "../upload-links/+page";
+import type { DownloadLink } from "../download-links/+page";
 
 export type { UploadLink, DownloadLink };
 
-export const load: PageServerLoad = async ({ request }) => {
-  const cookie = request.headers.get("cookie");
+export const load: PageLoad = async ({ fetch }) => {
   const [upRes, downRes] = await Promise.all([
-    apiFetch("/api/upload-links", cookie),
-    apiFetch("/api/download-links", cookie),
+    fetch("/api/upload-links"),
+    fetch("/api/download-links"),
   ]);
   const uploadLinks: UploadLink[] = upRes.ok ? await upRes.json() : [];
   const downloadLinks: DownloadLink[] = downRes.ok ? await downRes.json() : [];

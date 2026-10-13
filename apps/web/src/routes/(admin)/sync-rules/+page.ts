@@ -1,6 +1,6 @@
 import { redirect } from "@sveltejs/kit";
-import type { PageServerLoad } from "./$types";
-import type { PathSegment } from "../destinations/+page.server";
+import type { PageLoad } from "./$types";
+import type { PathSegment } from "../destinations/+page";
 
 export type SyncRuleSource = {
   type?: string;
@@ -27,6 +27,6 @@ export type SyncRule = {
   created_at: string;
 };
 
-export const load: PageServerLoad = async () => {
+export const load: PageLoad = async () => {
   throw redirect(302, "/sync");
 };

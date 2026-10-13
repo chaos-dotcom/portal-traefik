@@ -1,8 +1,7 @@
-import { apiFetch } from "$lib/server/api";
 import { error } from "@sveltejs/kit";
-import type { PageServerLoad } from "./$types";
-import type { UploadLink } from "../+page.server";
-import type { Destination } from "../../destinations/+page.server";
+import type { PageLoad } from "./$types";
+import type { UploadLink } from "../+page";
+import type { Destination } from "../../destinations/+page";
 
 export type UploadStats = {
   uploads: number;
@@ -10,12 +9,11 @@ export type UploadStats = {
   last_activity: string | null;
 };
 
-export const load: PageServerLoad = async ({ params, request }) => {
-  const cookie = request.headers.get("cookie");
+export const load: PageLoad = async ({ params, fetch }) => {
   const [linkRes, statsRes, destRes] = await Promise.all([
-    apiFetch(`/api/upload-links/${params.id}`, cookie),
-    apiFetch(`/api/upload-links/${params.id}/stats`, cookie),
-    apiFetch("/api/destinations", cookie),
+    fetch(`/api/upload-links/${params.id}`),
+    fetch(`/api/upload-links/${params.id}/stats`),
+    fetch("/api/destinations"),
   ]);
   if (!linkRes.ok) throw error(linkRes.status === 404 ? 404 : 500, "Upload link not found");
   const link: UploadLink = await linkRes.json();

@@ -1,5 +1,5 @@
 import { redirect } from "@sveltejs/kit";
-import type { PageServerLoad } from "./$types";
+import type { PageLoad } from "./$types";
 
 export type DownloadLink = {
   id: string;
@@ -20,6 +20,6 @@ export type DownloadLink = {
   created_at: string;
 };
 
-export const load: PageServerLoad = async () => {
+export const load: PageLoad = async () => {
   throw redirect(302, "/links");
 };

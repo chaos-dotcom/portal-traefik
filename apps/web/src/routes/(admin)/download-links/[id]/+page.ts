@@ -1,7 +1,6 @@
-import { apiFetch } from "$lib/server/api";
 import { error } from "@sveltejs/kit";
-import type { PageServerLoad } from "./$types";
-import type { DownloadLink } from "../+page.server";
+import type { PageLoad } from "./$types";
+import type { DownloadLink } from "../+page";
 
 export type DownloadEvent = {
   frameio_file_id: string;
@@ -36,13 +35,12 @@ export type SourceInfo = {
   resolved: boolean;
 };
 
-export const load: PageServerLoad = async ({ params, request }) => {
-  const cookie = request.headers.get("cookie");
+export const load: PageLoad = async ({ params, fetch }) => {
   const [linkRes, eventsRes, statsRes, sourceRes] = await Promise.all([
-    apiFetch(`/api/download-links/${params.id}`, cookie),
-    apiFetch(`/api/download-links/${params.id}/events`, cookie),
-    apiFetch(`/api/download-links/${params.id}/stats`, cookie),
-    apiFetch(`/api/download-links/${params.id}/source`, cookie),
+    fetch(`/api/download-links/${params.id}`),
+    fetch(`/api/download-links/${params.id}/events`),
+    fetch(`/api/download-links/${params.id}/stats`),
+    fetch(`/api/download-links/${params.id}/source`),
   ]);
   if (!linkRes.ok) throw error(linkRes.status === 404 ? 404 : 500, "Download link not found");
   const link: DownloadLink = await linkRes.json();

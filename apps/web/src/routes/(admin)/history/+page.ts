@@ -1,5 +1,4 @@
-import { apiFetch } from "$lib/server/api";
-import type { PageServerLoad } from "./$types";
+import type { PageLoad } from "./$types";
 
 export type Transfer = {
   id: string;
@@ -13,13 +12,11 @@ export type Transfer = {
 
 const PAGE_SIZE = 50;
 
-export const load: PageServerLoad = async ({ request, url }) => {
-  const cookie = request.headers.get("cookie");
+export const load: PageLoad = async ({ fetch, url }) => {
   const kind = url.searchParams.get("kind") ?? "all";
   const offset = Math.max(0, parseInt(url.searchParams.get("offset") ?? "0", 10) || 0);
-  const res = await apiFetch(
+  const res = await fetch(
     `/api/dashboard/history?kind=${encodeURIComponent(kind)}&limit=${PAGE_SIZE}&offset=${offset}`,
-    cookie,
   );
   const data = res.ok ? await res.json() : { items: [], has_more: false };
   return {
