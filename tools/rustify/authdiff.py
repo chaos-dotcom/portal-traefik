@@ -6,9 +6,17 @@
 Cookies are per-service (session tokens differ by design); response bodies must match.
 """
 
+import re
 import sys
 
 import httpx
+
+# Wall-clock fields that cannot match across two processes; normalised before comparison.
+_CLOCK = re.compile(rb'"(generated_at|expires_at|created_at|updated_at|started_at|completed_at|last_activity)":"[^"]*"')
+
+
+def _normalize(content: bytes) -> bytes:
+    return _CLOCK.sub(rb'"\1":"<clock>"', content)
 
 from matrix import VOLATILE_HEADERS
 
@@ -28,6 +36,13 @@ DEFAULT_PATHS = [
     "/api/activity/actions",
     "/api/activity/summary",
     "/api/destinations",
+    "/api/destinations/00000000-0000-4000-8000-000000000010",
+    "/api/settings/branding",
+    "/api/auth/passkeys",
+    "/api/privacy/subject?email=review@example.com",
+    "/api/download-links/00000000-0000-4000-8000-000000000200/source",
+    "/api/sync-rules/00000000-0000-4000-8000-000000000500/jobs",
+    "/api/webhook-events",
 ]
 
 
@@ -54,11 +69,11 @@ def main():
         b = get(rust, rc, path)
         ha = {k: v for k, v in a.headers.items() if k.lower() not in VOLATILE_HEADERS}
         hb = {k: v for k, v in b.headers.items() if k.lower() not in VOLATILE_HEADERS}
-        same = a.status_code == b.status_code and ha == hb and a.content == b.content
+        same = a.status_code == b.status_code and ha == hb and _normalize(a.content) == _normalize(b.content)
         print(f"{'OK  ' if same else 'DIFF'} {path}  {a.status_code} vs {b.status_code}")
         if not same:
             fails += 1
-            if a.content != b.content:
+            if _normalize(a.content) != _normalize(b.content):
                 print("   py  :", a.content[:400])
                 print("   rust:", b.content[:400])
     print("PASS" if fails == 0 else f"FAIL ({fails})")
