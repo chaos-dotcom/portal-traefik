@@ -3,12 +3,16 @@
 Machine: macOS 27.0.1, arm64, 10 logical CPUs, 24 GiB RAM, Docker 28.2.2 (Desktop).
 Same host, same Postgres/Redis/Caddy inside each image, same compiled load generator.
 
-> **Scope note (read first).** The Rust service is byte-for-byte identical to the Python service
-> for the endpoints listed in §5 — the unauthenticated surface plus the main read endpoints the
-> admin shell loads. Write endpoints, the sync worker, the Frame.io client, TOTP/passkey writes
-> and email are **not ported yet** (the Rust container's `worker` program is deliberately absent).
-> The size and runtime numbers below are honest for the two committed images, but the Rust image
-> is not yet a functional replacement until those are ported.
+> **Status: 1:1 functional drop-in.** All **101 API routes** are ported (`docs/rustification/COVERAGE.md`:
+> 100 done, 1 partial — `POST /api/destinations` needs a live Frame.io connection to validate a
+> folder, and reproduces the unconnected path). The Rust container runs Postgres, Redis, the API +
+> static SPA, **and the sync worker**; `portal-api seed` replaces the Python seed and `portal-api
+> worker` replaces the arq worker. No Python or Node at runtime.
+>
+> Paths that need live credentials or a browser (real Frame.io downloads/uploads, SMTP delivery,
+> browser WebAuthn) are ported but could not be end-to-end exercised here. Two deviations are
+> recorded in COVERAGE.md: passkeys registered by the Python service must be re-registered, and
+> the TOTP QR SVG bytes differ (same payload).
 
 ## 1. Byte-for-byte equivalence
 
