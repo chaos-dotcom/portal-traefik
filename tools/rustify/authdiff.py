@@ -27,6 +27,7 @@ DEFAULT_PATHS = [
     "/api/activity",
     "/api/activity/actions",
     "/api/activity/summary",
+    "/api/destinations",
 ]
 
 

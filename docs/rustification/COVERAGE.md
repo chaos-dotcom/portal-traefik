@@ -1,0 +1,118 @@
+# Portal → Rust: endpoint coverage
+
+Auto-generated inventory of the 101 API routes vs the Rust implementation.
+`done` = ported and verified byte-identical vs the Python service;
+`partial` = only the unauthenticated/unconnected path is ported; `todo` = not ported.
+
+| Method | Path | Python module | Rust |
+|---|---|---|---|
+| GET | `/api/activity` | activity.py | done |
+| GET | `/api/activity/actions` | activity.py | done |
+| GET | `/api/activity/summary` | activity.py | done |
+| POST | `/api/auth/login` | auth.py | done |
+| POST | `/api/auth/login/totp` | auth.py | todo |
+| POST | `/api/auth/logout` | auth.py | todo |
+| GET | `/api/auth/me` | auth.py | done |
+| POST | `/api/auth/passkeys/register/begin` | auth.py | todo |
+| POST | `/api/auth/passkeys/register/complete` | auth.py | todo |
+| POST | `/api/auth/passkeys/login/begin` | auth.py | todo |
+| POST | `/api/auth/passkeys/login/complete` | auth.py | todo |
+| GET | `/api/auth/passkeys` | auth.py | todo |
+| DELETE | `/api/auth/passkeys/{passkey_id}` | auth.py | todo |
+| GET | `/api/branding/logo` | branding.py | done |
+| GET | `/api/dashboard/transfers` | dashboard.py | done |
+| GET | `/api/dashboard/history` | dashboard.py | done |
+| GET | `/api/destinations` | destinations.py | done |
+| POST | `/api/destinations` | destinations.py | partial |
+| GET | `/api/destinations/{dest_id}` | destinations.py | todo |
+| PATCH | `/api/destinations/{dest_id}` | destinations.py | todo |
+| DELETE | `/api/destinations/{dest_id}` | destinations.py | todo |
+| GET | `/api/download-links` | download_links.py | done |
+| POST | `/api/download-links` | download_links.py | todo |
+| GET | `/api/download-links/{link_id}` | download_links.py | todo |
+| PATCH | `/api/download-links/{link_id}` | download_links.py | todo |
+| POST | `/api/download-links/{link_id}/revoke` | download_links.py | todo |
+| DELETE | `/api/download-links/{link_id}` | download_links.py | todo |
+| GET | `/api/download-links/{link_id}/events` | download_links.py | todo |
+| GET | `/api/download-links/{link_id}/stats` | download_links.py | todo |
+| GET | `/api/download-links/{link_id}/source` | download_links.py | todo |
+| GET | `/api/frameio/oauth/connect` | frameio.py | todo |
+| GET | `/api/frameio/oauth/callback` | frameio.py | todo |
+| GET | `/api/frameio/status` | frameio.py | done |
+| POST | `/api/frameio/disconnect` | frameio.py | todo |
+| GET | `/api/frameio/accounts` | frameio.py | todo |
+| GET | `/api/frameio/workspaces` | frameio.py | todo |
+| GET | `/api/frameio/projects` | frameio.py | todo |
+| POST | `/api/frameio/projects` | frameio.py | todo |
+| DELETE | `/api/frameio/projects/{project_id}` | frameio.py | todo |
+| GET | `/api/frameio/folders` | frameio.py | todo |
+| POST | `/api/frameio/folders` | frameio.py | todo |
+| GET | `/api/frameio/files` | frameio.py | todo |
+| GET | `/api/frameio/files/{file_id}/download-url` | frameio.py | todo |
+| DELETE | `/api/frameio/files/{file_id}` | frameio.py | todo |
+| DELETE | `/api/frameio/folders/{folder_id}` | frameio.py | todo |
+| PATCH | `/api/frameio/files/{file_id}/move` | frameio.py | todo |
+| POST | `/api/frameio/files/{file_id}/copy` | frameio.py | todo |
+| PATCH | `/api/frameio/folders/{folder_id}/move` | frameio.py | todo |
+| POST | `/api/frameio/folders/{folder_id}/copy` | frameio.py | todo |
+| POST | `/api/frameio/shares` | frameio.py | todo |
+| GET | `/api/health` | health.py | done |
+| GET | `/api/privacy/subject` | privacy.py | todo |
+| POST | `/api/privacy/subject/erase` | privacy.py | todo |
+| GET | `/api/public/links/{token}` | public.py | done |
+| POST | `/api/public/links/{token}/request-code` | public.py | todo |
+| POST | `/api/public/links/{token}/verify-code` | public.py | todo |
+| POST | `/api/public/links/{token}/verify-password` | public.py | todo |
+| POST | `/api/public/links/{token}/sessions` | public.py | todo |
+| POST | `/api/public/links/{token}/sessions/{session_id}/files` | public.py | todo |
+| POST | `/api/public/links/{token}/sessions/{session_id}/files/{file_id}/complete` | public.py | todo |
+| POST | `/api/public/links/{token}/sessions/{session_id}/complete` | public.py | todo |
+| POST | `/api/public/links/{token}/sessions/{session_id}/heartbeat` | public.py | todo |
+| POST | `/api/public/links/{token}/sessions/{session_id}/abandon` | public.py | todo |
+| GET | `/api/public/downloads/{token}` | public_downloads.py | todo |
+| POST | `/api/public/downloads/{token}/request-code` | public_downloads.py | todo |
+| POST | `/api/public/downloads/{token}/sessions` | public_downloads.py | todo |
+| POST | `/api/public/downloads/{token}/sessions/{session_id}/files/{file_id}/url` | public_downloads.py | todo |
+| GET | `/api/settings/security` | security.py | done |
+| POST | `/api/settings/totp/begin` | security.py | todo |
+| POST | `/api/settings/totp/enable` | security.py | todo |
+| POST | `/api/settings/totp/disable` | security.py | todo |
+| GET | `/api/settings/branding` | security.py | todo |
+| POST | `/api/settings/branding/logo` | security.py | todo |
+| DELETE | `/api/settings/branding/logo` | security.py | todo |
+| POST | `/api/settings/branding` | security.py | todo |
+| GET | `/api/settings/email` | settings.py | done |
+| POST | `/api/settings/email` | settings.py | todo |
+| POST | `/api/settings/email/test` | settings.py | todo |
+| GET | `/api/settings/frameio-config` | settings.py | done |
+| POST | `/api/settings/frameio-config` | settings.py | todo |
+| POST | `/api/settings/password` | settings.py | todo |
+| POST | `/api/sync-jobs/{job_id}/retry` | sync_jobs.py | todo |
+| POST | `/api/sync-jobs/{job_id}/dismiss` | sync_jobs.py | todo |
+| GET | `/api/sync-rules` | sync_rules.py | done |
+| POST | `/api/sync-rules` | sync_rules.py | todo |
+| GET | `/api/sync-rules/{rule_id}` | sync_rules.py | todo |
+| PATCH | `/api/sync-rules/{rule_id}` | sync_rules.py | todo |
+| DELETE | `/api/sync-rules/{rule_id}` | sync_rules.py | todo |
+| POST | `/api/sync-rules/{rule_id}/run` | sync_rules.py | todo |
+| GET | `/api/sync-rules/{rule_id}/jobs` | sync_rules.py | todo |
+| GET | `/api/sync-rules/{rule_id}/stats` | sync_rules.py | todo |
+| GET | `/api/upload-links/extension-preset` | upload_links.py | done |
+| GET | `/api/upload-links` | upload_links.py | done |
+| POST | `/api/upload-links` | upload_links.py | todo |
+| GET | `/api/upload-links/{link_id}` | upload_links.py | todo |
+| PATCH | `/api/upload-links/{link_id}` | upload_links.py | todo |
+| POST | `/api/upload-links/{link_id}/revoke` | upload_links.py | todo |
+| DELETE | `/api/upload-links/{link_id}` | upload_links.py | todo |
+| GET | `/api/upload-links/{link_id}/stats` | upload_links.py | todo |
+| POST | `/api/webhooks/frameio/{rule_id}` | webhooks.py | todo |
+| GET | `/api/webhook-events` | webhooks.py | todo |
+
+**19 done, 1 partial, 81 todo** (of 101 routes).
+
+Also ported: Starlette session middleware + `Vary: Cookie` semantics, FastAPI's 404/401 shapes,
+the full session-cookie format, the SPA static host and its auth gate.
+
+Remaining, by size: the Frame.io client + OAuth (`portal.frameio.*`, ~1.5k lines), the sync
+engine + arq worker (`portal.sync.*`), the upload/download session engines (`public.py`,
+`public_downloads.py`, `storage/`), email/verify, TOTP + WebAuthn mutations, webhooks, retention.

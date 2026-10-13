@@ -3,7 +3,9 @@ mod auth;
 mod config;
 mod error;
 mod routes;
+mod services;
 mod seed;
+mod frameio;
 mod session;
 mod spa;
 mod pyfmt;
@@ -64,6 +66,13 @@ async fn main() -> anyhow::Result<()> {
         .route("/branding/logo", get(routes::branding::get_logo))
         .route("/privacy/subject", get(routes::guarded::privacy_subject))
         .route("/dashboard/history", get(routes::dashboard::history))
+        .route("/destinations", get(routes::destinations::list_destinations).post(routes::destinations::create_destination))
+        .route(
+            "/destinations/{id}",
+            get(routes::destinations::get_destination)
+                .patch(routes::destinations::update_destination)
+                .delete(routes::destinations::delete_destination),
+        )
         .route("/sync-rules", get(routes::sync_rules::list_rules))
         .route("/activity", get(routes::activity::list_activity))
         .route("/activity/actions", get(routes::activity::list_actions))
