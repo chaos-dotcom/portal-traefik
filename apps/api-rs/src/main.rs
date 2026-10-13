@@ -8,6 +8,8 @@ mod services;
 mod seed;
 mod frameio;
 mod session;
+mod storage;
+mod sync;
 mod spa;
 mod pyfmt;
 mod state;
@@ -42,6 +44,14 @@ async fn main() -> anyhow::Result<()> {
         redis::Client::open(settings.redis_url.clone())?,
     )
     .await?;
+
+    // `portal-api worker` — the sync worker (replaces the arq process).
+    if std::env::args().nth(1).as_deref() == Some("worker") {
+        let settings = Arc::new(settings);
+        let frameio = Arc::new(frameio::FrameioClient::new(db.clone(), settings.clone()));
+        let state = AppState { settings, db, redis, frameio };
+        return sync::worker::run(state).await;
+    }
 
     let addr = format!("{}:{}", settings.host, settings.port);
     let settings = Arc::new(settings);
@@ -84,7 +94,15 @@ async fn main() -> anyhow::Result<()> {
                 .patch(routes::destinations::update_destination)
                 .delete(routes::destinations::delete_destination),
         )
-        .route("/sync-rules", get(routes::sync_rules::list_rules))
+        .route("/sync-rules", get(routes::sync_rules::list_rules).post(routes::sync_rules::create_rule))
+        .route("/sync-rules/{rule_id}", get(routes::sync_rules::get_rule).patch(routes::sync_rules::update_rule).delete(routes::sync_rules::delete_rule))
+        .route("/sync-rules/{rule_id}/run", post(routes::sync_rules::run_rule))
+        .route("/sync-rules/{rule_id}/jobs", get(routes::sync_rules::list_jobs))
+        .route("/sync-rules/{rule_id}/stats", get(routes::sync_rules::job_stats))
+        .route("/sync-jobs/{job_id}/retry", post(routes::sync_jobs::retry_job))
+        .route("/sync-jobs/{job_id}/dismiss", post(routes::sync_jobs::dismiss_job))
+        .route("/webhooks/frameio/{rule_id}", post(routes::webhooks::ingest_frameio))
+        .route("/webhook-events", get(routes::webhooks::list_events))
         .route("/activity", get(routes::activity::list_activity))
         .route("/activity/actions", get(routes::activity::list_actions))
         .route("/activity/summary", get(routes::activity::summary))

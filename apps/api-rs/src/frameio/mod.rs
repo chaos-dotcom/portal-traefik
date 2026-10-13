@@ -5,6 +5,7 @@
 mod client;
 pub mod connection;
 pub mod oauth;
+pub mod webhooks;
 
 pub use client::FrameioClient;
 

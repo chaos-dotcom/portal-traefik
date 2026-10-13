@@ -41,6 +41,12 @@ PORTED = {
     ("PATCH", "/api/download-links/{link_id}"), ("DELETE", "/api/download-links/{link_id}"),
     ("POST", "/api/download-links/{link_id}/revoke"), ("GET", "/api/download-links/{link_id}/events"),
     ("GET", "/api/download-links/{link_id}/stats"),
+    ("POST", "/api/sync-rules"), ("GET", "/api/sync-rules/{rule_id}"),
+    ("PATCH", "/api/sync-rules/{rule_id}"), ("DELETE", "/api/sync-rules/{rule_id}"),
+    ("POST", "/api/sync-rules/{rule_id}/run"), ("GET", "/api/sync-rules/{rule_id}/jobs"),
+    ("GET", "/api/sync-rules/{rule_id}/stats"), ("POST", "/api/sync-jobs/{job_id}/retry"),
+    ("POST", "/api/sync-jobs/{job_id}/dismiss"), ("POST", "/api/webhooks/frameio/{rule_id}"),
+    ("GET", "/api/webhook-events"),
 }
 PARTIAL = {("POST", "/api/destinations")}
 
