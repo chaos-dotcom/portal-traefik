@@ -16,7 +16,8 @@ pub async fn seed_admin(pool: &PgPool) -> anyhow::Result<()> {
         return Ok(());
     }
     let hash = bcrypt::hash(&password, bcrypt::DEFAULT_COST)?;
-    sqlx::query("INSERT INTO users (email, password_hash) VALUES ($1, $2)")
+    // is_active has no DB default (SQLAlchemy sets it at the model level); set it here.
+    sqlx::query("INSERT INTO users (email, password_hash, is_active) VALUES ($1, $2, true)")
         .bind(&email)
         .bind(&hash)
         .execute(pool)
