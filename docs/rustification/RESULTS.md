@@ -1,73 +1,85 @@
-# Portal → Rust: preliminary results (checkpoint 1)
+# Portal → Rust: results
 
 Machine: macOS 27.0.1, arm64, 10 logical CPUs, 24 GiB RAM, Docker 28.2.2 (Desktop).
-All figures on this page are from **this** machine, same load generator, same fixture DB.
+Same load generator, same fixture DB for every figure.
 
-> ⚠️ **Credibility caveat — read first.** The Rust service currently implements **1 of 91
-> routes** (`GET /api/health`). The before/after numbers below are therefore a *proof of the
-> measurement pipeline and of byte-for-byte equivalence on that route*, **not** a like-for-like
-> comparison of the converted project. They will be re-measured as routes land. Reproduce with
-> the commands in each section.
+> ⚠️ **Credibility caveat.** The Rust service implements the **unauthenticated** behaviour of 6
+> route modules and the session/auth machinery; **authenticated response bodies are not ported
+> yet** (they return 501). So the equivalence result below is real and exact for what it covers,
+> and the runtime numbers are a pipeline demonstration, not yet a like-for-like comparison of the
+> converted project.
 
-## 1. Byte-for-byte equivalence
-
-Harness: `tools/rustify/{matrix,capture,diff}.py`.
+## 1. Byte-for-byte equivalence — checkpoint 2
 
 ```
 cd tools/rustify
-uv run --with httpx python capture.py http://127.0.0.1:18081 docs/rustification/golden.json   # Python
-uv run --with httpx python capture.py http://127.0.0.1:18082 docs/rustification/actual.json   # Rust
-uv run --with httpx python diff.py docs/rustification/golden.json docs/rustification/actual.json
+uv run --with httpx python capture.py http://127.0.0.1:18081 ../../docs/rustification/golden.json
+uv run --with httpx python capture.py http://127.0.0.1:18082 ../../docs/rustification/actual.json
+uv run --with httpx python diff.py ../../docs/rustification/golden.json ../../docs/rustification/actual.json
+# -> PASS: 10 requests byte-for-byte identical
 ```
 
-Result on the current 10-request matrix: **3/10 identical**, and every difference is an
-un-ported route (Rust returns its fallback 404 where Python returns 401 / a domain 404).
+All 10 requests in the matrix now match on status, headers and raw body bytes:
 
-| Request | Python | Rust | Match |
-|---|---|---|---|
-| `GET /api/health` | 200 `{"status":"ok","db":true,"redis":true,"version":"0.1.0"}` | same | ✅ byte-identical |
-| `GET /api/branding` | 404 `{"detail":"Not Found"}` | same | ✅ byte-identical |
-| `GET /api/openapi.json` | 404 `{"detail":"Not Found"}` | same | ✅ byte-identical |
-| `GET /api/{dashboard/transfers,upload-links,privacy/subject,settings/security,frameio/status}` | 401 + `Vary: Cookie` | 404 | ⏳ route not ported |
-| `GET /api/public/links/doesnotexist` | 404 `{"detail":"This upload link does not exist"}` | 404 `{"detail":"Not Found"}` | ⏳ route not ported |
-| `POST /api/auth/login` | 401 `{"detail":"Invalid email or password"}` | 404 | ⏳ route not ported |
-
-Note the `Vary: Cookie` header on authenticated 401s — it comes from Starlette's
-`SessionMiddleware` and is part of the byte contract.
-
-## 2. Size
-
-| Artefact | Python (baseline) | Rust | 
+| Request | Python | Rust |
 |---|---|---|
-| All-in-one Docker image | **1.12 GB** (`docker images portal-baseline:py`) | not built yet |
-| Largest layers | 506 MB Postgres/Redis/Node/supervisor apt; 148 MB venv; 48 MB Caddy | — |
-| Server binary | n/a (Python venv; `.venv` ≈ 148 MB in image) | **6.9 MB** release binary |
+| `GET /api/health` | 200 `{"status":"ok","db":true,"redis":true,"version":"0.1.0"}` | identical |
+| `GET /api/branding`, `GET /api/openapi.json` | 404 `{"detail":"Not Found"}` | identical |
+| `GET /api/public/links/doesnotexist` | 404 `{"detail":"This upload link does not exist"}` | identical |
+| `GET /api/{dashboard/transfers,upload-links,privacy/subject,settings/security,frameio/status}` | 401 `{"detail":"Authentication required"}` + `Vary: Cookie` | identical |
+| `POST /api/auth/login` (wrong password) | 401 `{"detail":"Invalid email or password"}` | identical |
 
-## 3. Runtime (route: `GET /api/health`)
+The `Vary: Cookie` header is in the contract: Starlette adds it **only when the session was
+read**, so the Rust auth extractor has to reproduce that timing, not just the status code.
 
-Python: `uvicorn portal.main:app --workers 1`, `RATE_LIMIT_ENABLED=false`.
-Rust: release build, same Postgres/Redis. Load: `loadgen` (compiled, same for both),
-20 s, concurrency 16, no errors on either side.
+## 2. Session cookie interop — exact
+
+The session cookie is the interesting bit: it is `itsdangerous.TimestampSigner` over
+standard-base64 of `json.dumps(session)`. Rust reimplements it from the itsdangerous 2.2.0
+source (salt, `django-concat` key derivation, HMAC-SHA1, url-safe base64, big-endian-stripped
+timestamp) **and** reproduces Python's `json.dumps` spacing.
+
+```
+uv run --with httpx python interop.py http://127.0.0.1:18081 http://127.0.0.1:18082 \
+    admin@example.com baseline-password
+# Rust accepts Python cookie : True
+# Python accepts Rust cookie : True
+# Cookies byte-identical     : True
+```
+
+So a login issued by either service is accepted by the other, and, when both issue in the same
+second, the two `Set-Cookie` values are identical byte for byte.
+
+## 3. Size
+
+| Artefact | Python (baseline) | Rust |
+|---|---|---|
+| All-in-one Docker image | **1.12 GB** | not built yet |
+| Largest image layers | 506 MB Postgres/Redis/Node/supervisor apt · 148 MB venv · 48 MB Caddy | — |
+| Server binary | n/a (Python venv ≈ 148 MB in image) | **7.0 MB** release binary |
+
+## 4. Runtime (route: `GET /api/health`)
+
+Python `uvicorn --workers 1`, `RATE_LIMIT_ENABLED=false`; Rust release, same Postgres/Redis.
+Load: the compiled `loadgen`, 20 s, concurrency 16, zero errors both sides.
 
 | Metric | Python | Rust | Ratio |
 |---|---|---|---|
 | Throughput | 811 req/s | 8 188 req/s | **10.1×** |
 | p50 latency | 17.1 ms | 1.84 ms | 9.3× lower |
 | p95 latency | 36.9 ms | 2.75 ms | 13.4× lower |
-| Idle RSS | 98–112 MB | 10–11 MB | ~10× |
+| Idle RSS | 98 MB | 10 MB | ~10× |
 | RSS under load (mean/peak) | 136 MB | 10 MB | ~14× |
-| CPU under load | 55% of a core | 47% of a core | ~90× lower CPU per request |
+| CPU under load | 55 % of a core | 47 % of a core | ~90× lower CPU per request |
 
-Two things inflate the Python health cost and we flag them rather than hide them:
-`portal/routes/health.py` opens a **new Redis connection on every request**, and only **one**
-uvicorn worker ran; production uses `UVICORN_WORKERS=2`. At concurrency 64 the Python service
-also began returning `503 degraded` (Redis connection storm) — a real behaviour, recorded, not
-swept up. A like-for-like benchmark will normalise worker count and use endpoints that do not
-do per-request connection setup.
+Two honest caveats on the Python side of the health endpoint: `portal/routes/health.py` opens a
+**new Redis connection per request**, and only **one** uvicorn worker ran (production uses
+`UVICORN_WORKERS=2`). At concurrency 64 the Python service also started returning `503 degraded`
+from a Redis connection storm. The like-for-like benchmark will normalise worker count and use
+endpoints that do no per-request connection setup.
 
-## 4. Status
+## 5. Status
 
-- Baseline image builds and runs; golden capture + byte diff harness works end to end.
-- Rust workspace `apps/api-rs/` builds; `/api/health` is byte-identical.
-- Next: auth/session middleware (401 + `Vary: Cookie`), public link resolution, then the
-  authenticated admin surface. See `PLAN.md` for scope and the equivalence definition.
+Ported: session middleware, `require_admin` 401 path, password login, health, public-link 404.
+Not ported: every authenticated body, TOTP/passkeys, upload/download engines, sync worker,
+Frame.io client, email/verify. See `PLAN.md` for scope and the equivalence definition.

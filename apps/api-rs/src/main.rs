@@ -1,12 +1,15 @@
 
+mod auth;
 mod config;
 mod error;
 mod routes;
+mod session;
 mod state;
 
 use std::sync::Arc;
 
-use axum::{routing::get, Router};
+use axum::routing::{get, post};
+use axum::Router;
 use config::Settings;
 use state::AppState;
 use tracing_subscriber::EnvFilter;
@@ -36,7 +39,30 @@ async fn main() -> anyhow::Result<()> {
 
     let app = Router::new()
         .route("/api/health", get(routes::health::health))
+        .route("/api/auth/login", post(auth::login))
+        .route("/api/public/links/{token}", get(routes::public::resolve_link))
+        .route(
+            "/api/dashboard/transfers",
+            get(routes::guarded::dashboard_transfers),
+        )
+        .route(
+            "/api/upload-links",
+            get(routes::guarded::upload_links_index),
+        )
+        .route(
+            "/api/privacy/subject",
+            get(routes::guarded::privacy_subject),
+        )
+        .route(
+            "/api/settings/security",
+            get(routes::guarded::settings_security),
+        )
+        .route("/api/frameio/status", get(routes::guarded::frameio_status))
         .fallback(error::not_found)
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            session::session_middleware,
+        ))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;

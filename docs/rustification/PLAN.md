@@ -1,6 +1,7 @@
 # Portal → Rust: conversion plan, equivalence definition, and measurement protocol
 
-Status: in progress (branch `rust-port`). Author: agent, at owner request
+Status: in progress (branch `rust-port`) — checkpoint 2: unauthenticated surface byte-identical
+(10/10 matrix) + exact session-cookie interop. See `RESULTS.md`. Author: agent, at owner request
 (goal: "convert this project to rust on a byte for byte accurate level, show performance
 differences, RAM CPU and binary/docker image sizes before and after rustification").
 
