@@ -50,6 +50,8 @@ pub struct Settings {
     pub verify_resend_cooldown_seconds: i64,
     pub verify_trust_days: i64,
     pub verify_check_mx: bool,
+    pub webauthn_rp_id: String,
+    pub webauthn_rp_name: String,
 }
 
 fn env_bool(key: &str, default: bool) -> bool {
@@ -129,6 +131,8 @@ impl Settings {
             verify_resend_cooldown_seconds: env_i64("VERIFY_RESEND_COOLDOWN_SECONDS", 30),
             verify_trust_days: env_i64("VERIFY_TRUST_DAYS", 30),
             verify_check_mx: env_bool("VERIFY_CHECK_MX", true),
+            webauthn_rp_id: std::env::var("WEBAUTHN_RP_ID").unwrap_or_default(),
+            webauthn_rp_name: std::env::var("WEBAUTHN_RP_NAME").unwrap_or_else(|_| "Portal".to_string()),
         }
     }
 }

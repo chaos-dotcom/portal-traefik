@@ -8,7 +8,7 @@ use axum::Json;
 use chrono::{DateTime, Utc};
 use serde_json::json;
 
-use crate::auth::Admin;
+use crate::auth::{Admin, SessionExt};
 use crate::state::AppState;
 use sqlx::Row;
 
@@ -95,4 +95,15 @@ pub async fn security_status(State(state): State<AppState>, admin: Admin) -> Res
         .collect();
     Json(json!({ "totp_enabled": totp_enabled.unwrap_or(false), "passkeys": passkeys }))
         .into_response()
+}
+
+/// `POST /api/auth/logout` — clear the session (`session.clear()`), then `{"ok": true}`.
+pub async fn logout(SessionExt(session): SessionExt) -> Response {
+    {
+        let mut s = session.lock().unwrap();
+        s.accessed = true;
+        s.data.clear();
+        s.modified = true;
+    }
+    Json(json!({ "ok": true })).into_response()
 }

@@ -2,6 +2,8 @@
 //! Admin authentication: the `require_admin` extractor and the password login, mirroring
 //! `portal.auth.session` and `portal.routes.auth.login`.
 
+pub mod totp;
+pub mod webauthn;
 use axum::extract::{FromRequestParts, State};
 use axum::http::request::Parts;
 use axum::http::StatusCode;
@@ -143,4 +145,104 @@ pub async fn login(
         axum::Json(json!({ "totp_required": false, "id": id.to_string(), "email": body.email })),
     )
         .into_response()
+}
+
+const TOTP_PENDING_TTL: i64 = 300;
+const TOTP_MAX_ATTEMPTS: i64 = 5;
+
+fn clear_totp_pending(session: &SessionHandle) {
+    let mut s = session.lock().unwrap();
+    s.remove("totp_pending_uid");
+    s.remove("totp_pending_ts");
+    s.remove("totp_pending_attempts");
+}
+
+/// `POST /api/auth/login/totp` — the second factor after a password step.
+pub async fn login_totp(
+    State(state): State<AppState>,
+    SessionExt(session): SessionExt,
+    axum::extract::Json(body): axum::extract::Json<LoginRequest>,
+) -> Response {
+    let (uid, ts) = {
+        let mut s = session.lock().unwrap();
+        (
+            s.get("totp_pending_uid").and_then(|v| v.as_str()).map(|x| x.to_string()),
+            s.get("totp_pending_ts").and_then(|v| v.as_i64()),
+        )
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let Some(uid) = uid else {
+        clear_totp_pending(&session);
+        return detail(StatusCode::UNAUTHORIZED, "Your login session expired — start again");
+    };
+    let Some(ts) = ts else {
+        clear_totp_pending(&session);
+        return detail(StatusCode::UNAUTHORIZED, "Your login session expired — start again");
+    };
+    if now - ts > TOTP_PENDING_TTL {
+        clear_totp_pending(&session);
+        return detail(StatusCode::UNAUTHORIZED, "Your login session expired — start again");
+    }
+    let Ok(id) = Uuid::parse_str(&uid) else {
+        clear_totp_pending(&session);
+        return detail(StatusCode::UNAUTHORIZED, "Invalid login");
+    };
+    let row: Option<(bool, Option<String>, Option<serde_json::Value>)> = sqlx::query_as(
+        "SELECT totp_enabled, totp_secret_encrypted, totp_recovery_codes FROM users WHERE id=$1",
+    )
+    .bind(id)
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten();
+    let Some((totp_enabled, secret_enc, recovery)) = row else {
+        return detail(StatusCode::UNAUTHORIZED, "Invalid login");
+    };
+    if !totp_enabled || secret_enc.is_none() {
+        return detail(StatusCode::UNAUTHORIZED, "Invalid login");
+    }
+    let secret = crate::crypto::TokenCipher::new(&state.settings.token_encryption_key)
+        .decrypt(secret_enc.as_deref().unwrap_or(""))
+        .unwrap_or_default();
+    let code = body.password.clone();
+    let mut ok = crate::auth::totp::verify_code(&secret, &code);
+    if !ok {
+        let hashes: Vec<String> = recovery
+            .as_ref()
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+            .unwrap_or_default();
+        if let Some(remaining) = crate::auth::totp::consume_recovery_code(&code, &hashes) {
+            let _ = sqlx::query("UPDATE users SET totp_recovery_codes=$1, updated_at=now() WHERE id=$2")
+                .bind(serde_json::json!(remaining))
+                .bind(id)
+                .execute(&state.db)
+                .await;
+            ok = true;
+        }
+    }
+    if !ok {
+        let attempts = {
+            let mut s = session.lock().unwrap();
+            let a = s.get("totp_pending_attempts").and_then(|v| v.as_i64()).unwrap_or(0) + 1;
+            s.set("totp_pending_attempts", serde_json::json!(a));
+            a
+        };
+        if attempts >= TOTP_MAX_ATTEMPTS {
+            clear_totp_pending(&session);
+            return detail(StatusCode::UNAUTHORIZED, "Too many incorrect codes — sign in again");
+        }
+        return detail(StatusCode::UNAUTHORIZED, "Invalid code");
+    }
+    clear_totp_pending(&session);
+    {
+        let mut s = session.lock().unwrap();
+        s.set("user_id", serde_json::json!(id.to_string()));
+    }
+    let email: String = sqlx::query_scalar("SELECT email FROM users WHERE id=$1")
+        .bind(id).fetch_one(&state.db).await.unwrap_or_default();
+    axum::Json(serde_json::json!({ "id": id.to_string(), "email": email })).into_response()
 }

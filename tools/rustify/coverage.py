@@ -32,8 +32,8 @@ PORTED = {
     ("GET", "/api/settings/security"), ("GET", "/api/settings/email"),
     ("GET", "/api/settings/frameio-config"), ("GET", "/api/sync-rules"), ("GET", "/api/activity"),
     ("GET", "/api/activity/actions"), ("GET", "/api/activity/summary"), ("GET", "/api/branding/logo"),
-    ("GET", "/api/destinations"), ("POST", "/api/destinations"), ("GET", "/api/destinations/{id}"),
-    ("PATCH", "/api/destinations/{id}"), ("DELETE", "/api/destinations/{id}"),
+    ("GET", "/api/destinations"), ("POST", "/api/destinations"), ("GET", "/api/destinations/{dest_id}"),
+    ("PATCH", "/api/destinations/{dest_id}"), ("DELETE", "/api/destinations/{dest_id}"),
     ("POST", "/api/upload-links"), ("GET", "/api/upload-links/{link_id}"),
     ("PATCH", "/api/upload-links/{link_id}"), ("DELETE", "/api/upload-links/{link_id}"),
     ("POST", "/api/upload-links/{link_id}/revoke"), ("GET", "/api/upload-links/{link_id}/stats"),
@@ -57,6 +57,18 @@ PORTED = {
     ("GET", "/api/public/downloads/{token}"), ("POST", "/api/public/downloads/{token}/request-code"),
     ("POST", "/api/public/downloads/{token}/sessions"),
     ("POST", "/api/public/downloads/{token}/sessions/{session_id}/files/{file_id}/url"),
+    ("POST", "/api/auth/login/totp"), ("POST", "/api/auth/logout"),
+    ("GET", "/api/auth/passkeys"), ("DELETE", "/api/auth/passkeys/{passkey_id}"),
+    ("POST", "/api/auth/passkeys/register/begin"), ("POST", "/api/auth/passkeys/register/complete"),
+    ("POST", "/api/auth/passkeys/login/begin"), ("POST", "/api/auth/passkeys/login/complete"),
+    ("GET", "/api/download-links/{link_id}/source"),
+    ("GET", "/api/privacy/subject"), ("POST", "/api/privacy/subject/erase"),
+    ("POST", "/api/settings/totp/begin"), ("POST", "/api/settings/totp/enable"),
+    ("POST", "/api/settings/totp/disable"), ("GET", "/api/settings/branding"),
+    ("POST", "/api/settings/branding"), ("POST", "/api/settings/branding/logo"),
+    ("DELETE", "/api/settings/branding/logo"),
+    ("POST", "/api/settings/email"), ("POST", "/api/settings/email/test"),
+    ("POST", "/api/settings/frameio-config"), ("POST", "/api/settings/password"),
 }
 PARTIAL = {("POST", "/api/destinations")}
 
@@ -88,9 +100,18 @@ def main() -> None:
         lines.append(f"| {method} | `{path}` | {mod} | {status} |")
     todo = len(routes) - done - partial
     lines += ["", f"**{done} done, {partial} partial, {todo} todo** (of {len(routes)} routes).", "",
-              "Also ported: Starlette session middleware + `Vary: Cookie`, FastAPI's 404/401 shapes,",
-              "the exact session-cookie format, the Frame.io client + connection/token lifecycle",
-              "(AES-GCM secrets at rest, Adobe IMS refresh), the SPA static host + auth gate."]
+              "The whole runtime is Rust: HTTP + auth (sessions, bcrypt, TOTP, WebAuthn) + the",
+              "Frame.io client and token lifecycle (AES-GCM at rest, Adobe IMS refresh) + the sync",
+              "engine and its worker + the upload/download link engines + email/SMTP + the SPA host.",
+              "The `portal-api worker` subprocess replaces the arq worker.", "",
+              "Exercised against the Python service: the unauthenticated matrix (10/10), the",
+              "authenticated read suite, session-cookie interop, webhook signing, the picker 409s,",
+              "and every route above that is reachable without live Frame.io/SMTP. Live Frame.io",
+              "downloads/uploads, SMTP delivery and browser WebAuthn need real credentials or a",
+              "browser, so those paths are ported but not end-to-end exercised here.", "",
+              "Known deviations: passkeys registered by the Python service must be re-registered",
+              "(webauthn-rs stores its own serialized passkey in `public_key`); the QR SVG bytes",
+              "differ (different qrcode library, same payload)."]
     OUT.write_text("\n".join(lines))
     print(f"{done} done, {partial} partial, {todo} todo of {len(routes)}")
 

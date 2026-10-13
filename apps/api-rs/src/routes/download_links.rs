@@ -333,3 +333,107 @@ pub async fn list_links(State(state): State<AppState>, _: Admin) -> Response {
     }
     Json(Value::Array(out)).into_response()
 }
+
+fn generic_label(source: &Value) -> String {
+    match source.get("type").and_then(|v| v.as_str()) {
+        Some("file") => "Single file".to_string(),
+        Some("folder") => {
+            if source.get("recursive").and_then(|v| v.as_bool()).unwrap_or(false) {
+                "Folder (recursive)".to_string()
+            } else {
+                "Folder".to_string()
+            }
+        }
+        Some("selection") => format!(
+            "{} files",
+            source.get("file_ids").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0)
+        ),
+        _ => "—".to_string(),
+    }
+}
+
+/// `GET /api/download-links/{link_id}/source` — best-effort human-readable source for the editor.
+pub async fn source_info(State(state): State<AppState>, _: Admin, axum::extract::Path(id): axum::extract::Path<uuid::Uuid>) -> Response {
+    let Some(link) = fetch_out(&state, id).await else { return not_found() };
+    let source = link.get("source").cloned().unwrap_or_else(|| json!({}));
+    let stype = source.get("type").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let account_id = source.get("account_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+    let result: Option<Value> = match stype.as_str() {
+        "folder" => {
+            let folder_id = source.get("folder_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            match state.frameio.get_folder(&account_id, &folder_id).await {
+                Ok(folder) => {
+                    let ancestry = state.frameio.folder_ancestry(&account_id, &folder_id).await.unwrap_or_default();
+                    let project = match &folder.project_id {
+                        Some(pid) => state.frameio.get_project(&account_id, pid).await.ok(),
+                        None => None,
+                    };
+                    let mut path: Vec<Value> = ancestry.iter().map(|i| json!({ "id": i.id, "name": i.name })).collect();
+                    if let Some(p) = &project {
+                        if let Some(root) = &p.root_folder_id {
+                            if path.first().and_then(|s| s.get("id")).and_then(|v| v.as_str()) == Some(root.as_str()) {
+                                path[0] = json!({ "id": root, "name": format!("{} (root)", p.name) });
+                            }
+                        }
+                    }
+                    let names: Vec<String> = path.iter().filter_map(|p| p.get("name").and_then(|v| v.as_str()).map(|s| s.to_string())).collect();
+                    let names = if names.is_empty() { vec![folder_id.clone()] } else { names };
+                    let full = names.join("/");
+                    Some(json!({
+                        "type": "folder",
+                        "label": full,
+                        "account_id": account_id,
+                        "workspace_id": project.as_ref().and_then(|p| p.workspace_id.clone()),
+                        "project_id": folder.project_id,
+                        "project_name": project.as_ref().map(|p| p.name.clone()),
+                        "folder_id": folder_id,
+                        "folder_name": ancestry.last().map(|i| i.name.clone()).unwrap_or(folder_id.clone()),
+                        "folder_path": full,
+                        "path": path,
+                        "recursive": source.get("recursive").and_then(|v| v.as_bool()).unwrap_or(false),
+                        "resolved": true,
+                    }))
+                }
+                Err(_) => None,
+            }
+        }
+        "file" => {
+            let file_id = source.get("file_id").and_then(|v| v.as_str()).unwrap_or("");
+            match state.frameio.get_file(&account_id, file_id).await {
+                Ok(f) => {
+                    let name = f.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    Some(json!({ "type": "file", "label": name, "files": [name], "resolved": true }))
+                }
+                Err(_) => None,
+            }
+        }
+        "selection" => match crate::downloads::resolve_source(&state.frameio, &source).await {
+            Ok(resolved) => {
+                let names: Vec<String> = resolved.files.iter().map(|f| f.name.clone()).collect();
+                Some(json!({ "type": "selection", "label": format!("{} files", names.len()), "files": names, "resolved": true }))
+            }
+            Err(_) => None,
+        },
+        _ => None,
+    };
+
+    match result {
+        Some(v) => Json(v).into_response(),
+        None => Json(json!({
+            "type": if stype.is_empty() { "unknown".to_string() } else { stype },
+            "label": generic_label(&source),
+            "account_id": Value::Null,
+            "workspace_id": Value::Null,
+            "project_id": Value::Null,
+            "project_name": Value::Null,
+            "folder_id": Value::Null,
+            "folder_name": Value::Null,
+            "folder_path": Value::Null,
+            "path": Value::Null,
+            "recursive": Value::Null,
+            "files": Value::Null,
+            "resolved": false,
+        })).into_response(),
+    }
+}
