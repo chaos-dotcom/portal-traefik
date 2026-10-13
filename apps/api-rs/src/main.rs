@@ -49,7 +49,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/public/links/{token}", get(routes::public::resolve_link))
         .route(
             "/dashboard/transfers",
-            get(routes::guarded::dashboard_transfers),
+            get(routes::dashboard::transfers),
         )
         .route("/upload-links", get(routes::upload_links::list_links))
         .route("/privacy/subject", get(routes::guarded::privacy_subject))

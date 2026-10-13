@@ -10,6 +10,11 @@ VALUES ('00000000-0000-4000-8000-000000000001', 'Acme Post', '#ff8800', true,
         '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00');
 
 -- One destination with a cached Frame.io breadcrumb under config.path.
+DELETE FROM sync_jobs;
+DELETE FROM sync_rules;
+DELETE FROM download_events;
+DELETE FROM download_sessions;
+DELETE FROM upload_sessions;
 DELETE FROM download_links;
 DELETE FROM upload_links;
 DELETE FROM destinations;
@@ -43,4 +48,45 @@ VALUES ('00000000-0000-4000-8000-000000000200', 'dl-fixed-token-cccccccccccccccc
         NULL, NULL, 5, 2, '{"name":true,"email":true}'::jsonb, NULL, true,
         'Acme Review', 'Watch the cut', false,
         '2026-02-03T11:00:00+00:00', '2026-02-03T11:00:00+00:00');
+
+-- One completed upload session (feeds the dashboard transfer list).
+INSERT INTO upload_sessions (id, upload_link_id, uploader_name, uploader_email, uploader_message,
+                             status, frameio_asset_ids, total_bytes, started_at, completed_at,
+                             created_at, updated_at, uploaded_bytes, last_activity_at)
+VALUES ('00000000-0000-4000-8000-000000000300', '00000000-0000-4000-8000-000000000100',
+        'Dana Camera', 'dana@example.com', 'Act 1 rushes', 'completed',
+        '[{"file_id":"asset-1","name":"A001_C001.mxf","size":1073741824}]'::jsonb, 1073741824,
+        '2026-02-04T09:00:00+00:00', '2026-02-04T09:12:00+00:00',
+        '2026-02-04T09:00:00+00:00', '2026-02-04T09:12:00+00:00', 1073741824,
+        '2026-02-04T09:12:00+00:00');
+
+-- One download session + one completed download event.
+INSERT INTO download_sessions (id, download_link_id, viewer_name, viewer_email, ip, user_agent,
+                               started_at, created_at, updated_at, files)
+VALUES ('00000000-0000-4000-8000-000000000400', '00000000-0000-4000-8000-000000000200',
+        'Reviewer One', 'review@example.com', '203.0.113.7', 'Mozilla/5.0',
+        '2026-02-05T10:00:00+00:00', '2026-02-05T10:00:00+00:00',
+        '2026-02-05T10:05:00+00:00', NULL);
+
+INSERT INTO download_events (id, download_session_id, frameio_file_id, file_name, completed,
+                             bytes_served, started_at, ip, user_agent)
+VALUES ('00000000-0000-4000-8000-000000000401', '00000000-0000-4000-8000-000000000400',
+        'file-fixed-1', 'A001_C001.mxf', true, 1073741824, '2026-02-05T10:00:00+00:00',
+        '203.0.113.7', 'Mozilla/5.0');
+
+-- One sync rule + one completed sync job.
+INSERT INTO sync_rules (id, name, source_config, destination_path, conflict_policy, path_template,
+                        enabled, webhook_secret, frameio_webhook_id, created_at, updated_at)
+VALUES ('00000000-0000-4000-8000-000000000500', 'Rushes to NAS',
+        '{"type":"frameio","account_id":"acct-fixed","folder_id":"fold-fixed"}'::jsonb,
+        '/mnt/nas/rushes', 'overwrite', NULL, true, NULL, NULL,
+        '2026-01-20T00:00:00+00:00', '2026-01-20T00:00:00+00:00');
+
+INSERT INTO sync_jobs (id, sync_rule_id, frameio_file_id, status, bytes, sha256, error,
+                       retry_count, started_at, completed_at, created_at, updated_at,
+                       source_wait_started_at)
+VALUES ('00000000-0000-4000-8000-000000000501', '00000000-0000-4000-8000-000000000500',
+        'asset-1', 'done', 1073741824, NULL, NULL, 0,
+        '2026-02-06T08:00:00+00:00', '2026-02-06T08:20:00+00:00',
+        '2026-02-06T08:00:00+00:00', '2026-02-06T08:20:00+00:00', NULL);
 COMMIT;

@@ -14,9 +14,6 @@ fn not_ported() -> Response {
     detail(StatusCode::NOT_IMPLEMENTED, "endpoint not yet ported")
 }
 
-pub async fn dashboard_transfers(_: Admin) -> Response {
-    not_ported()
-}
 pub async fn privacy_subject(_: Admin) -> Response {
     not_ported()
 }
