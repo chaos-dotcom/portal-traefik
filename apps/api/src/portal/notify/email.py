@@ -7,6 +7,7 @@ from the request path (fire via BackgroundTasks); failures are logged, never sur
 
 from dataclasses import dataclass
 from email.message import EmailMessage
+from email.utils import getaddresses
 from html import escape
 from typing import TYPE_CHECKING
 
@@ -135,6 +136,9 @@ async def send_email(
     """Send one email. Raises EmailError if SMTP isn't configured or the send fails."""
     if not config.configured:
         raise EmailError("Email is not configured")
+    # Every caller sends to exactly one person; never let an address list fan a message out.
+    if len(getaddresses([to])) != 1:
+        raise EmailError("Refusing to send to more than one recipient")
 
     message = EmailMessage()
     message["From"] = config.smtp_from
@@ -169,6 +173,23 @@ def _meta_row(label: str, value: str) -> str:
     )
 
 
+def _file_lines(files: list[UploadedFile]) -> list[str]:
+    return [
+        f"  • {f.name}  ({_format_bytes(f.size) if f.size is not None else '—'})" for f in files
+    ]
+
+
+def _file_list_html(files: list[UploadedFile]) -> str:
+    rows = "".join(
+        '<li style="margin:2px 0">'
+        f'<span style="color:#18181b">{escape(f.name)}</span> '
+        f'<span style="color:#a1a1aa">'
+        f"({escape(_format_bytes(f.size) if f.size is not None else '—')})</span></li>"
+        for f in files
+    )
+    return f'<ul style="margin:0 0 16px;padding-left:18px">{rows}</ul>'
+
+
 def render_upload_completion(
     *,
     link_name: str,
@@ -193,24 +214,13 @@ def render_upload_completion(
         f"Message:          {uploader_message or '—'}",
         "",
         f"Files ({count}):",
-    ]
-    for f in files:
-        size = _format_bytes(f.size) if f.size is not None else "—"
-        lines.append(f"  • {f.name}  ({size})")
-    lines += [
+        *_file_lines(files),
         "",
         f"Total:    {_format_bytes(total_bytes)}",
         f"Duration: {_format_duration(duration_seconds)}",
     ]
     text = "\n".join(lines)
 
-    file_rows = "".join(
-        '<li style="margin:2px 0">'
-        f'<span style="color:#18181b">{escape(f.name)}</span> '
-        f'<span style="color:#a1a1aa">'
-        f"({escape(_format_bytes(f.size) if f.size is not None else '—')})</span></li>"
-        for f in files
-    )
     body_html = (
         f'<p style="margin:0 0 16px">A new upload completed on '
         f'<strong>{escape(link_name)}</strong>.</p>'
@@ -220,8 +230,8 @@ def render_upload_completion(
         + _meta_row("Message", uploader_message or "—")
         + "</table>"
         f'<p style="margin:0 0 4px;font-weight:600;color:#18181b">Files ({count})</p>'
-        f'<ul style="margin:0 0 16px;padding-left:18px">{file_rows}</ul>'
-        '<table role="presentation" style="border-collapse:collapse;width:100%">'
+        + _file_list_html(files)
+        + '<table role="presentation" style="border-collapse:collapse;width:100%">'
         + _meta_row("Total", _format_bytes(total_bytes))
         + _meta_row("Duration", _format_duration(duration_seconds))
         + "</table>"
@@ -259,6 +269,66 @@ async def send_upload_completion(
         await send_email(config, config.resolved_notify_email, subject, text, html)
     except EmailError:
         pass  # already logged; never let a notification failure break the upload flow
+
+
+def render_upload_receipt(
+    *,
+    link_name: str,
+    files: list[UploadedFile],
+    total_bytes: int,
+    brand: EmailBrand | None = None,
+) -> tuple[str, str, str]:
+    """Build the (subject, text body, html body) for the uploader's delivery receipt (issue #86):
+    the list of files that arrived, for them to keep. Carries nothing the uploader didn't send."""
+    brand = brand or EmailBrand()
+    count = len(files)
+    noun = f"{count} file{'s' if count != 1 else ''}"
+    subject = f"Delivered to {link_name}: {noun}"
+    text = "\n".join(
+        [
+            f'Your upload to "{link_name}" is complete. These files were delivered:',
+            "",
+            *_file_lines(files),
+            "",
+            f"Total: {noun}, {_format_bytes(total_bytes)}",
+        ]
+    )
+    body_html = (
+        f'<p style="margin:0 0 16px">Your upload to <strong>{escape(link_name)}</strong> is '
+        "complete. These files were delivered:</p>"
+        + _file_list_html(files)
+        + '<table role="presentation" style="border-collapse:collapse;width:100%">'
+        + _meta_row("Total", f"{noun}, {_format_bytes(total_bytes)}")
+        + "</table>"
+    )
+    html = _html_shell(brand=brand, heading="Upload complete", body_html=body_html)
+    return subject, text, html
+
+
+async def send_upload_receipt(
+    config: "EmailConfig",
+    *,
+    to: str,
+    link_name: str,
+    files: list[UploadedFile],
+    total_bytes: int,
+    brand: EmailBrand | None = None,
+) -> None:
+    """Email the uploader their delivery receipt (best-effort).
+
+    Only ever to an address the uploader proved they own — checking that is the caller's job (see
+    routes.public.complete_session); mailing typed-in addresses would let anyone make Portal send
+    mail to any inbox.
+    """
+    if not config.configured:
+        return
+    subject, text, html = render_upload_receipt(
+        link_name=link_name, files=files, total_bytes=total_bytes, brand=brand
+    )
+    try:
+        await send_email(config, to, subject, text, html)
+    except EmailError:
+        pass  # already logged; a receipt failure must never break the upload flow
 
 
 async def send_test_email(config: "EmailConfig", brand: EmailBrand | None = None) -> None:

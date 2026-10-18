@@ -57,20 +57,23 @@ async def process_event(
 ) -> int:
     """Process one persisted webhook event; return the number of sync jobs created.
 
-    For each created job, ``on_job_created`` (if given) is awaited with the new job id — the worker
-    uses it to enqueue the download. Idempotent: already-processed events are skipped, and a
-    (rule, file) pair that already has a job is not duplicated, so webhook retries and the
-    file.ready / file.upload.completed pair don't create extra jobs.
+    For each job to run, ``on_job_created`` (if given) is awaited with its id — the worker uses it
+    to enqueue the download. That is every created job, plus an existing job parked in "waiting":
+    the arrival event is the news it was waiting for (see ``_job_to_run``). Idempotent:
+    already-processed events are skipped, and a (rule, file) pair that already has a job is not
+    duplicated, so webhook retries and the file.ready / file.upload.completed pair don't create
+    extra jobs.
     """
     event = await db.get(WebhookEvent, event_id)
     if event is None or event.processed:
         return 0
 
     created_ids: list[uuid.UUID] = []
+    woken_ids: list[uuid.UUID] = []
     try:
         payload = parse_webhook_payload(event.raw)
         if is_sync_trigger(payload) and payload.resource_id is not None:
-            created_ids = await _create_jobs(db, payload, payload.resource_id)
+            created_ids, woken_ids = await _jobs_for_event(db, payload, payload.resource_id)
         event.processed = True
         event.processed_at = datetime.now(UTC)
         event.error = None
@@ -85,9 +88,11 @@ async def process_event(
     await db.commit()
     if created_ids:
         log.info("webhook.jobs_created", event_id=str(event_id), count=len(created_ids))
-        if on_job_created is not None:
-            for job_id in created_ids:
-                await on_job_created(job_id)
+    if woken_ids:
+        log.info("webhook.jobs_woken", event_id=str(event_id), count=len(woken_ids))
+    if on_job_created is not None:
+        for job_id in [*created_ids, *woken_ids]:
+            await on_job_created(job_id)
     return len(created_ids)
 
 
@@ -101,6 +106,9 @@ async def trigger_sync_for_upload(
     rule whose source folder *is* the upload's destination folder. Files added directly in Frame.io
     (outside Portal) aren't covered here — the reconcile cron catches those.
 
+    A file that already has a job parked in "waiting" gets that job woken now (see
+    ``_job_to_run``).
+
     Runs as a background task in the API process: opens its own session, commits, then enqueues
     (so the worker never races a not-yet-committed job row).
     """
@@ -108,6 +116,7 @@ async def trigger_sync_for_upload(
         return 0
 
     created_ids: list[uuid.UUID] = []
+    woken_ids: list[uuid.UUID] = []
     async with get_sessionmaker()() as db:
         result = await db.execute(select(SyncRule).where(SyncRule.enabled.is_(True)))
         rules = [
@@ -118,45 +127,59 @@ async def trigger_sync_for_upload(
         ]
         for rule in rules:
             for file_id in file_ids:
-                existing = await db.scalar(
-                    select(SyncJob.id).where(
-                        SyncJob.sync_rule_id == rule.id,
-                        SyncJob.frameio_file_id == file_id,
-                    )
-                )
-                if existing is not None:
-                    continue
-                job = SyncJob(sync_rule_id=rule.id, frameio_file_id=file_id, status="pending")
-                db.add(job)
-                await db.flush()
-                created_ids.append(job.id)
+                found = await _job_to_run(db, rule.id, file_id)
+                if found is not None:
+                    job_id, created = found
+                    (created_ids if created else woken_ids).append(job_id)
         await db.commit()
 
-    for job_id in created_ids:
+    for job_id in [*created_ids, *woken_ids]:
         await enqueue_sync_job(job_id)
     if created_ids:
         log.info("sync.upload_trigger.created", folder_id=folder_id, count=len(created_ids))
+    if woken_ids:
+        log.info("sync.upload_trigger.woken", folder_id=folder_id, count=len(woken_ids))
     return len(created_ids)
 
 
-async def _create_jobs(
+async def _job_to_run(
+    db: AsyncSession, rule_id: uuid.UUID, file_id: str
+) -> tuple[uuid.UUID, bool] | None:
+    """The job to run now for a file that just arrived, as ``(job_id, created)`` — or None when
+    the file's existing job needs nothing (done, running, already queued, ...).
+
+    A new file gets a new pending job. An existing job parked in "waiting" is woken: the reconcile
+    cron often finds a large file on Frame.io while it is still uploading and leaves its job
+    re-checking readiness every ``sync_source_poll_seconds``. Deduping on the existing row used to
+    ignore the arrival — the moment we know the file is finalized — so the sync trailed the
+    upload by up to a full poll (issue #85). Waking it is safe: the worker claims jobs atomically
+    and drops the superseded poll (see portal.sync.worker.run_sync_job).
+    """
+    existing = await db.scalar(
+        select(SyncJob).where(SyncJob.sync_rule_id == rule_id, SyncJob.frameio_file_id == file_id)
+    )
+    if existing is None:
+        job = SyncJob(sync_rule_id=rule_id, frameio_file_id=file_id, status="pending")
+        db.add(job)
+        await db.flush()
+        return job.id, True
+    if existing.status == "waiting":
+        return existing.id, False
+    return None
+
+
+async def _jobs_for_event(
     db: AsyncSession, payload: WebhookPayload, file_id: str
-) -> list[uuid.UUID]:
+) -> tuple[list[uuid.UUID], list[uuid.UUID]]:
+    """Jobs to run for a file-arrival event, as (created, woken) id lists."""
     result = await db.execute(select(SyncRule).where(SyncRule.enabled.is_(True)))
-    created: list[uuid.UUID] = []
+    created_ids: list[uuid.UUID] = []
+    woken_ids: list[uuid.UUID] = []
     for rule in result.scalars().all():
         if not rule_matches(rule.source_config, payload):
             continue
-        existing = await db.scalar(
-            select(SyncJob.id).where(
-                SyncJob.sync_rule_id == rule.id,
-                SyncJob.frameio_file_id == file_id,
-            )
-        )
-        if existing is not None:
-            continue
-        job = SyncJob(sync_rule_id=rule.id, frameio_file_id=file_id, status="pending")
-        db.add(job)
-        await db.flush()
-        created.append(job.id)
-    return created
+        found = await _job_to_run(db, rule.id, file_id)
+        if found is not None:
+            job_id, created = found
+            (created_ids if created else woken_ids).append(job_id)
+    return created_ids, woken_ids

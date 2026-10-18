@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { fly } from "svelte/transition";
-  import { Button, Card, PoweredByPortal } from "$lib/components";
+  import { Button, Card, CopyButton, PoweredByPortal } from "$lib/components";
   import { formatBytes } from "$lib/format";
   import {
     abandonSession,
@@ -55,8 +55,23 @@
   let uploadedBytes = $state(0);
   let currentFile = $state<string | null>(null);
   let doneFiles = $state<Set<string>>(new Set());
+  let deliveredAt = $state<Date | null>(null);
+  let receiptTo = $state<string | null>(null);
 
   const totalBytes = $derived(items.reduce((s, it) => s + it.file.size, 0));
+
+  // A receipt of what arrived, for the uploader to keep or forward (issue #86).
+  const deliveredLabel = $derived(
+    deliveredAt?.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) ?? "",
+  );
+  const receipt = $derived(
+    [
+      `Delivered to ${link.display_name} — ${deliveredLabel}`,
+      `${items.length} file${items.length === 1 ? "" : "s"} (${formatBytes(totalBytes)})`,
+      "",
+      ...items.map((it) => `${it.path}  (${formatBytes(it.file.size)})`),
+    ].join("\n"),
+  );
   const percent = $derived(totalBytes > 0 ? Math.min(100, (uploadedBytes / totalBytes) * 100) : 0);
 
   // Liveness for the server while uploading: a progress heartbeat, plus a best-effort abandon
@@ -183,6 +198,7 @@
         message: message || undefined,
         password: password || undefined,
         code: code || undefined,
+        total_bytes: totalBytes,
       });
       sessionId = sid;
       // Code accepted by the server — consume it so it never lingers in the UI.
@@ -190,7 +206,7 @@
       code = "";
       // The server accepted these details, so they're worth remembering for next time.
       if (name.trim() || email.trim()) saveUploaderPrefs(name.trim(), email.trim());
-      await runUpload(data.token, sid, items, {
+      const result = await runUpload(data.token, sid, items, {
         onBytes: (d) => (uploadedBytes += d),
         onFileStart: (p) => (currentFile = p),
         onFileDone: (p) => {
@@ -198,6 +214,8 @@
           currentFile = null;
         },
       });
+      receiptTo = result.receipt_to ?? null;
+      deliveredAt = new Date();
       phase = "done";
     } catch (e) {
       // Tell the server this session is dead so it leaves "Uploading now" right away
@@ -213,6 +231,8 @@
   function uploadMore() {
     items = [];
     doneFiles = new Set();
+    deliveredAt = null;
+    receiptTo = null;
     uploadedBytes = 0;
     sessionId = null;
     currentFile = null;
@@ -255,6 +275,26 @@
         <p class="mt-1 text-sm text-muted">
           {items.length} file{items.length === 1 ? "" : "s"} ({formatBytes(totalBytes)}) delivered.
         </p>
+        <p class="mt-0.5 text-xs text-faint">{deliveredLabel}</p>
+        <div class="mt-4 max-h-56 space-y-1 overflow-auto text-left text-sm">
+          {#each items as it (it.path)}
+            <div class="flex items-center justify-between rounded bg-success/10 px-2 py-1">
+              <span class="truncate">{it.path}</span>
+              <span class="ml-2 flex shrink-0 items-center gap-2 text-xs text-faint">
+                {formatBytes(it.file.size)}<span class="text-success">✓</span>
+              </span>
+            </div>
+          {/each}
+        </div>
+        <CopyButton
+          value={receipt}
+          label="Copy list of files"
+          title="Copy the list of delivered files"
+          class="mt-2 text-xs"
+        />
+        {#if receiptTo}
+          <p class="mt-1 text-xs text-faint">A copy is on its way to {receiptTo}.</p>
+        {/if}
         <div class="mt-5">
           <Button {accent} onclick={uploadMore}>Forgot something? Send another</Button>
         </div>

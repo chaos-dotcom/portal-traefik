@@ -16,7 +16,8 @@ short-lived signed URLs.
 - **Upload links** - branded landing page; anyone can drag-drop files (folder
   structure preserved, resumable) into a configured Frame.io project/folder. Per-link expiry,
   password, size cap, allowed extensions, uploader-info fields, optional email verification, and
-  an optional target subfolder + path template. Email notification on completion.
+  an optional target subfolder + path template. Email notification on completion; uploaders see
+  a receipt of what arrived, and on email-verified links also get it by email.
 - **Download links** — branded page to hand a file, a selection, or a whole folder
   to clients or collaborators, downloaded straight from Frame.io via signed URLs. Optional preview
   thumbnails, password, max-downloads, viewer fields.

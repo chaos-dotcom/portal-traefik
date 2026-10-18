@@ -248,8 +248,14 @@ async def get_download_url(
     _require_usable(link)
     session = await _load_session(db, link, session_id)
 
-    # Slide the device trust window on real activity (verified links only).
-    if link.verify_email and session.viewer_email:
+    # Slide the device trust window on real activity — only for an address this browser already
+    # verified. A session started before the link switched verification on carries an unverified
+    # email, and minting trust for it would let it pass upload links' verification too.
+    if (
+        link.verify_email
+        and session.viewer_email
+        and verify.is_trusted(request, session.viewer_email)
+    ):
         verify.issue_trust(response, session.viewer_email)
 
     if link.max_downloads is not None and link.downloads_count >= link.max_downloads:

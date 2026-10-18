@@ -18,7 +18,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from portal.auth.session import require_admin
@@ -48,6 +48,9 @@ async def retry_job(
 ) -> dict[str, Any]:
     """Queue another attempt at one job, whatever state it ended in."""
     job = await _get_or_404(db, job_id)
+    if job.status == "running":
+        # Resetting it would queue a second download of the same file next to the live one.
+        raise HTTPException(status_code=409, detail="This job is running right now")
     job.status = "pending"
     job.retry_count = 0
     job.error = None

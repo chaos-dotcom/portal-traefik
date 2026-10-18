@@ -21,7 +21,7 @@ class _StubBackend:
         *,
         parent_id: str = "fld-1",
         status: str = "transcoded",
-        relative_dir: str = "",
+        relative_dir: str | None = "",
     ) -> None:
         self._files = files
         self._parent_id = parent_id
@@ -474,3 +474,151 @@ async def test_reconcile_leaves_a_freshly_queued_job_alone(tmp_path: Path) -> No
         created = await runner.reconcile_rule(db, rule_id, backend=backend, enqueue=enqueue)  # type: ignore[arg-type]
     assert created == 0
     assert enqueued == []
+
+
+async def test_execute_job_outside_rule_folder_skipped(tmp_path: Path, monkeypatch: Any) -> None:
+    # Issue #65: a recursive rule on IN got a webhook for a file in the sibling OUT folder (webhooks
+    # match the whole project) and wrote it to <dest>/root/OUT. A file whose ancestry never
+    # reaches the rule's folder must be skipped, and nothing written.
+    _patch_download(monkeypatch)
+    rule_id = await _make_rule(str(tmp_path))
+    job_id = await _make_job(rule_id)
+    backend = _StubBackend([], parent_id="out-folder", relative_dir=None)
+    async with get_sessionmaker()() as db:
+        job = await db.get(SyncJob, job_id)
+        await runner.execute_job(db, job, backend=backend)  # type: ignore[arg-type]
+        await db.commit()
+    async with get_sessionmaker()() as db:
+        job = await db.get(SyncJob, job_id)
+        assert job.status == "skipped"
+        assert job.error == "outside the rule's source folder"
+    assert list(tmp_path.iterdir()) == []  # noqa: ASYNC240
+
+
+async def test_execute_job_outside_rule_folder_skipped_before_readiness_wait(
+    tmp_path: Path,
+) -> None:
+    # An out-of-scope file still uploading is skipped at once, not polled for hours first.
+    rule_id = await _make_rule(str(tmp_path))
+    job_id = await _make_job(rule_id)
+    backend = _StubBackend([], relative_dir=None, status="created")
+    async with get_sessionmaker()() as db:
+        job = await db.get(SyncJob, job_id)
+        await runner.execute_job(db, job, backend=backend)  # type: ignore[arg-type]
+        assert job.status == "skipped"
+
+
+async def test_reconcile_enqueues_only_committed_jobs(tmp_path: Path) -> None:
+    # A worker can pick a task up the instant it's enqueued; the row must already be visible to
+    # it, or the task is dropped and the file strands until the stale-pending check.
+    rule_id = await _make_rule(str(tmp_path))
+    files = [RemoteFile(id="f1", name="a.mov"), RemoteFile(id="f2", name="b.mov")]
+    visible: list[bool] = []
+
+    async def enqueue(job_id: uuid.UUID) -> None:
+        async with get_sessionmaker()() as other:
+            visible.append(await other.get(SyncJob, job_id) is not None)
+
+    async with get_sessionmaker()() as db:
+        n = await runner.reconcile_rule(
+            db,
+            rule_id,
+            backend=_StubBackend(files),
+            enqueue=enqueue,  # type: ignore[arg-type]
+        )
+    assert n == 2
+    assert visible == [True, True]
+
+
+async def _waiting_job(rule_id: uuid.UUID, file_id: str, *, untouched_for: timedelta) -> uuid.UUID:
+    async with get_sessionmaker()() as db:
+        job = SyncJob(sync_rule_id=rule_id, frameio_file_id=file_id, status="waiting")
+        db.add(job)
+        await db.commit()
+        job.updated_at = datetime.now(UTC) - untouched_for
+        await db.commit()
+        return job.id
+
+
+async def test_reconcile_requeues_a_waiting_job_that_lost_its_recheck(tmp_path: Path) -> None:
+    """Every readiness re-check touches the row, so a waiting job untouched for far longer than the
+    re-check cadence has lost its queued re-check — and nothing else would ever run it again."""
+    rule_id = await _make_rule(str(tmp_path))
+    stranded_id = await _waiting_job(rule_id, "stranded", untouched_for=timedelta(hours=2))
+    enqueued: list[uuid.UUID] = []
+
+    async def enqueue(job_id: uuid.UUID) -> None:
+        enqueued.append(job_id)
+
+    backend = _StubBackend([RemoteFile(id="stranded", name="s")])
+    async with get_sessionmaker()() as db:
+        created = await runner.reconcile_rule(db, rule_id, backend=backend, enqueue=enqueue)  # type: ignore[arg-type]
+    assert created == 1
+    assert enqueued == [stranded_id]
+    async with get_sessionmaker()() as db:
+        job = await db.get(SyncJob, stranded_id)
+        assert job.status == "pending"
+        assert job.source_wait_started_at is None  # a fresh readiness window
+
+
+async def test_reconcile_leaves_a_live_waiting_job_alone(tmp_path: Path) -> None:
+    rule_id = await _make_rule(str(tmp_path))
+    await _waiting_job(rule_id, "live", untouched_for=timedelta(minutes=1))
+    enqueued: list[uuid.UUID] = []
+
+    async def enqueue(job_id: uuid.UUID) -> None:
+        enqueued.append(job_id)
+
+    backend = _StubBackend([RemoteFile(id="live", name="s")])
+    async with get_sessionmaker()() as db:
+        created = await runner.reconcile_rule(db, rule_id, backend=backend, enqueue=enqueue)  # type: ignore[arg-type]
+    assert created == 0
+    assert enqueued == []
+
+
+async def _job_in(rule_id: uuid.UUID, file_id: str, **fields: Any) -> uuid.UUID:
+    async with get_sessionmaker()() as db:
+        job = SyncJob(sync_rule_id=rule_id, frameio_file_id=file_id, **fields)
+        db.add(job)
+        await db.commit()
+        return job.id
+
+
+async def _reconcile(rule_id: uuid.UUID, file_ids: list[str]) -> list[uuid.UUID]:
+    enqueued: list[uuid.UUID] = []
+
+    async def enqueue(job_id: uuid.UUID) -> None:
+        enqueued.append(job_id)
+
+    backend = _StubBackend([RemoteFile(id=f, name=f"{f}.mov") for f in file_ids])
+    async with get_sessionmaker()() as db:
+        await runner.reconcile_rule(db, rule_id, backend=backend, enqueue=enqueue)  # type: ignore[arg-type]
+    return enqueued
+
+
+async def test_reconcile_revisits_a_file_skipped_as_outside(tmp_path: Path) -> None:
+    """Skipped as outside the rule's folder, then moved in on Frame.io: reconcile's own listing of
+    the folder now contains it, so the skip is reset and the file syncs after all."""
+    rule_id = await _make_rule(str(tmp_path))
+    moved = await _job_in(rule_id, "moved", status="skipped", error=runner.OUT_OF_SCOPE)
+    await _job_in(rule_id, "kept", status="skipped", error="source file no longer exists")
+
+    assert await _reconcile(rule_id, ["moved", "kept"]) == [moved]
+    async with get_sessionmaker()() as db:
+        job = await db.get(SyncJob, moved)
+        assert job.status == "pending" and job.error is None
+
+
+async def test_reconcile_rescues_a_retry_whose_follow_up_was_lost(tmp_path: Path) -> None:
+    """A failed attempt leaves the job pending (started_at set) with a retry queued. If that retry
+    task is lost, nothing would run the job again, and the dashboard would show it in flight."""
+    rule_id = await _make_rule(str(tmp_path))
+    job_id = await _job_in(
+        rule_id, "retrying", status="pending", retry_count=2, started_at=datetime.now(UTC)
+    )
+    async with get_sessionmaker()() as db:
+        job = await db.get(SyncJob, job_id)
+        job.updated_at = datetime.now(UTC) - timedelta(hours=2)
+        await db.commit()
+
+    assert await _reconcile(rule_id, ["retrying"]) == [job_id]

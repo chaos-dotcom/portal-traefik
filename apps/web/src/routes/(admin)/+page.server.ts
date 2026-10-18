@@ -25,6 +25,7 @@ export type RecentTransfer = {
 export type SyncHealth = {
   waiting: number;
   running: number;
+  queued: number;
   dead_letter: number;
   done_24h: number;
   dead_letter_rule_id?: string | null;
@@ -39,7 +40,14 @@ export type Transfers = {
 const EMPTY: Transfers = {
   active_uploads: [],
   recent: [],
-  sync_health: { waiting: 0, running: 0, dead_letter: 0, done_24h: 0, dead_letter_rule_id: null },
+  sync_health: {
+    waiting: 0,
+    running: 0,
+    queued: 0,
+    dead_letter: 0,
+    done_24h: 0,
+    dead_letter_rule_id: null,
+  },
 };
 
 export const load: PageServerLoad = async ({ request }) => {

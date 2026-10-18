@@ -25,7 +25,7 @@ from portal.lib.errors import NotFoundError
 from portal.lib.lockout import check_password_lockout, register_password_failure
 from portal.lib.logging import get_logger
 from portal.lib.ratelimit import limit
-from portal.notify.email import UploadedFile, send_upload_completion
+from portal.notify.email import UploadedFile, send_upload_completion, send_upload_receipt
 from portal.services.app_settings import email_brand, resolve_branding
 from portal.services.runtime_config import get_email_config
 from portal.storage.base import DestinationConfig, UploadNotReady
@@ -191,6 +191,10 @@ class StartSessionRequest(BaseModel):
     message: str | None = None
     password: str | None = None
     code: str | None = None
+    # Size of the whole batch the uploader selected. Known up front in the browser, so the
+    # dashboard can show the real total for an in-flight upload rather than summing the files
+    # registered so far (which grows as the upload progresses).
+    total_bytes: int | None = Field(default=None, ge=0)
 
 
 class StartSessionResult(BaseModel):
@@ -222,6 +226,12 @@ class CompleteFileResult(BaseModel):
 
 class CompleteSessionRequest(BaseModel):
     total_bytes: int | None = None
+
+
+class CompleteSessionResult(BaseModel):
+    ok: bool
+    # Where the uploader's delivery receipt is being emailed, if anywhere (issue #86).
+    receipt_to: str | None = None
 
 
 class HeartbeatRequest(BaseModel):
@@ -306,6 +316,7 @@ async def start_session(
         uploader_message=body.message,
         status="in_progress",
         started_at=datetime.now(UTC),
+        total_bytes=body.total_bytes,
     )
     db.add(session)
     await db.commit()
@@ -406,25 +417,42 @@ async def complete_file(
     return CompleteFileResult(complete=True, failed=False)
 
 
-@router.post("/{token}/sessions/{session_id}/complete", response_model=PasswordVerifyResult)
+@router.post("/{token}/sessions/{session_id}/complete", response_model=CompleteSessionResult)
 async def complete_session(
     token: str,
     session_id: str,
     body: CompleteSessionRequest,
     background: BackgroundTasks,
+    request: Request,
     response: Response,
     db: AsyncSession = Depends(get_session),
-) -> PasswordVerifyResult:
+) -> CompleteSessionResult:
     link = await _get_link(db, token)
     session = await _load_session(db, link, session_id)
 
-    # Slide the device trust window on a real upload (verified links only).
-    if link.verify_email and session.uploader_email:
-        verify.issue_trust(response, session.uploader_email)
+    # The uploader's email, if this browser proved it owns it: a verified link plus the matching
+    # device-trust cookie. Gates both sliding the trust window and the delivery receipt — never
+    # extend trust to, or mail, an address this browser didn't verify (say, a session started
+    # before the link switched verification on), or anyone could have Portal mail any inbox.
+    verified_email = (
+        session.uploader_email.strip()
+        if link.verify_email
+        and session.uploader_email
+        and verify.is_trusted(request, session.uploader_email)
+        else None
+    )
+    if verified_email:
+        verify.issue_trust(response, verified_email)  # slide the trust window on a real upload
+    # Notify (admin + receipt) on the first completion only: the browser retries a completion
+    # whose response it lost, and a replayed call mustn't mail anyone again.
+    first_completion = session.status != "completed"
     now = datetime.now(UTC)
     session.status = "completed"
     session.completed_at = now
-    session.total_bytes = body.total_bytes
+    if body.total_bytes is not None:
+        session.total_bytes = body.total_bytes
+        # The last heartbeat lags the real end of the upload; a completed session moved everything.
+        session.uploaded_bytes = body.total_bytes
 
     # Snapshot what the notification + sync trigger need BEFORE commit (attrs expire on commit).
     entries = session.frameio_asset_ids or []
@@ -445,26 +473,39 @@ async def complete_session(
     await db.commit()
     log.info("public.upload.session_completed", session_id=session_id)
 
-    background.add_task(
-        send_upload_completion,
-        email_config,
-        link_name=link_name,
-        uploader_name=uploader[0],
-        uploader_email=uploader[1],
-        uploader_message=uploader[2],
-        files=files,
-        total_bytes=total_bytes,
-        duration_seconds=duration,
-        brand=brand,
-    )
+    if first_completion:
+        background.add_task(
+            send_upload_completion,
+            email_config,
+            link_name=link_name,
+            uploader_name=uploader[0],
+            uploader_email=uploader[1],
+            uploader_message=uploader[2],
+            files=files,
+            total_bytes=total_bytes,
+            duration_seconds=duration,
+            brand=brand,
+        )
     # Portal's own sync trigger: mirror client-uploaded files to any matching sync rule's NAS
     # destination immediately, instead of waiting on a Frame.io webhook (which self-serve plans
     # don't deliver) or the reconcile cron.
+    # The uploader's own receipt of what arrived (issue #86) — verified addresses only, see above.
+    receipt_to = verified_email if first_completion and email_config.configured else None
+    if receipt_to:
+        background.add_task(
+            send_upload_receipt,
+            email_config,
+            to=receipt_to,
+            link_name=link_name,
+            files=files,
+            total_bytes=total_bytes,
+            brand=brand,
+        )
     if sync_account and sync_folder and uploaded_file_ids:
         background.add_task(
             trigger_sync_for_upload, sync_account, sync_folder, uploaded_file_ids
         )
-    return PasswordVerifyResult(ok=True)
+    return CompleteSessionResult(ok=True, receipt_to=receipt_to)
 
 
 # Like complete_*, heartbeat/abandon skip _require_usable: an upload that outlives its link's

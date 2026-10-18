@@ -54,6 +54,9 @@ PICKER_MAX_ITEMS = 1000
 # Safety cap on a folder ancestor walk so a cycle or a never-terminating parent chain can't
 # loop forever; Frame.io trees are nowhere near this deep in practice.
 _MAX_FOLDER_DEPTH = 64
+# How long a cached folder (name, parent) is trusted. Short enough that a folder moved into or out
+# of a sync rule's folder is noticed within minutes; long enough to spare repeat Frame.io calls.
+_FOLDER_META_TTL_S = 600.0
 _HTTP_TIMEOUT = 30.0
 
 
@@ -221,10 +224,12 @@ class FrameioClient:
         # avoid duplicate folders within a worker.
         self._folder_cache: dict[tuple[str, str], str] = {}
         self._folder_lock = asyncio.Lock()
-        # Cache of folder_id -> (name, parent_id) for ancestor walks (folder_relative_path), so
-        # files sharing a subtree don't re-fetch each ancestor. Folder moves are rare; a stale
-        # entry only mis-places a path segment, which reconcile/admin re-run can correct.
-        self._folder_meta_cache: dict[str, tuple[str, str | None]] = {}
+        # Cache of folder_id -> (name, parent_id, fetched_at) for ancestor walks
+        # (folder_relative_path, folder_ancestry), so files sharing a subtree don't re-fetch each
+        # ancestor. Entries expire after _FOLDER_META_TTL_S: the sync engine decides from these
+        # walks whether a file is inside a rule's folder, so a moved folder must be seen again.
+        self._folder_meta_cache: dict[str, tuple[str, str | None, float]] = {}
+        self._clock: Callable[[], float] = time.monotonic  # swappable in tests
 
     async def aclose(self) -> None:
         await self._httpx.aclose()
@@ -370,13 +375,17 @@ class FrameioClient:
 
     async def folder_relative_path(
         self, account_id: str, parent_id: str | None, root_folder_id: str
-    ) -> str:
+    ) -> str | None:
         """POSIX path of a file's folder *relative to* ``root_folder_id`` (root exclusive).
 
         Walks up from ``parent_id`` collecting folder names until it reaches the rule's root
         folder, so the sync engine can mirror Frame.io's subfolder tree onto the destination.
-        Returns ``""`` when the file sits directly in the root folder. Caps depth and de-dups
-        visited ids to survive an unexpected cycle or a parent chain that never hits the root.
+        Returns ``""`` when the file sits directly in the root folder, and ``None`` when the walk
+        never reaches it — the file lives elsewhere in the project (a sibling folder, the project
+        root), so it is outside the rule's folder. Caps depth and de-dups visited ids to survive an
+        unexpected cycle; either also counts as "never reached". Folder metadata is cached for
+        _FOLDER_META_TTL_S, so a just-moved folder can read stale until then; the sync engine's
+        reconcile re-checks files it skipped as outside (see portal.sync.runner).
         """
         if parent_id is None or parent_id == root_folder_id:
             return ""
@@ -388,17 +397,23 @@ class FrameioClient:
             if current is None or current == root_folder_id or current in seen:
                 break
             seen.add(current)
-            cached = self._folder_meta_cache.get(current)
-            if cached is None:
-                folder = await self.get_folder(account_id, current)
-                cached = (folder.name, folder.parent_id)
-                self._folder_meta_cache[current] = cached
-            name, next_parent = cached
+            name, next_parent = await self._folder_meta(account_id, current)
             segments.append(name)
             current = next_parent
-
+        if current != root_folder_id:
+            return None
         segments.reverse()
         return "/".join(segments)
+
+    async def _folder_meta(self, account_id: str, folder_id: str) -> tuple[str, str | None]:
+        """A folder's (name, parent_id), from the cache while the entry is fresh."""
+        now = self._clock()
+        cached = self._folder_meta_cache.get(folder_id)
+        if cached is not None and now - cached[2] < _FOLDER_META_TTL_S:
+            return cached[0], cached[1]
+        folder = await self.get_folder(account_id, folder_id)
+        self._folder_meta_cache[folder_id] = (folder.name, folder.parent_id, now)
+        return folder.name, folder.parent_id
 
     async def folder_ancestry(self, account_id: str, folder_id: str) -> list[PickerItem]:
         """Folder ancestry as PickerItems, top-most ancestor first, ending at this folder.
@@ -414,12 +429,7 @@ class FrameioClient:
             if current is None or current in seen:
                 break
             seen.add(current)
-            cached = self._folder_meta_cache.get(current)
-            if cached is None:
-                folder = await self.get_folder(account_id, current)
-                cached = (folder.name, folder.parent_id)
-                self._folder_meta_cache[current] = cached
-            name, parent = cached
+            name, parent = await self._folder_meta(account_id, current)
             items.append(PickerItem(id=current, name=name, parent_id=parent))
             current = parent
         items.reverse()

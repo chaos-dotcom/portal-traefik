@@ -174,8 +174,67 @@ async def test_folder_relative_path_depth_capped_on_cycle() -> None:
     c = FrameioClient()
     c._client = ns(folders=folders)  # type: ignore[assignment]
     try:
-        out = await c.folder_relative_path("acct", "c", "root-never-reached")
-        assert out  # returns something finite rather than looping forever
+        # Terminates (depth cap / seen-set) rather than looping, and reports "never reached".
+        assert await c.folder_relative_path("acct", "c", "root-never-reached") is None
+    finally:
+        await c.aclose()
+
+
+async def test_folder_relative_path_sibling_folder_is_outside_root() -> None:
+    # Issue #65. Project root folder "root" holds IN (the rule's folder) and OUT. A file in OUT
+    # walks up past "root" without meeting IN; it used to come back as "root/OUT" and get synced
+    # to <dest>/root/OUT. It must be reported as outside the rule's folder instead.
+    folders = _ShowFolders(
+        {"out": ("OUT", "proj-root"), "in": ("IN", "proj-root"), "proj-root": ("root", None)}
+    )
+    c = FrameioClient()
+    c._client = ns(folders=folders)  # type: ignore[assignment]
+    try:
+        assert await c.folder_relative_path("acct", "out", "in") is None
+        assert await c.folder_relative_path("acct", "proj-root", "in") is None
+    finally:
+        await c.aclose()
+
+
+async def test_folder_relative_path_sees_a_moved_folder_once_its_cache_expires() -> None:
+    # The scope verdict comes from cached folder metadata, so it must not stay stale: a folder moved
+    # from OUT into IN (the rule's folder) is seen in its new place once the entry expires.
+    from portal.frameio.client import _FOLDER_META_TTL_S
+
+    tree = {
+        "x": ("Day2", "out"),
+        "out": ("OUT", "proj-root"),
+        "in": ("IN", "proj-root"),
+        "proj-root": ("root", None),
+    }
+    folders = _ShowFolders(tree)
+    now = [1000.0]
+    c = FrameioClient()
+    c._client = ns(folders=folders)  # type: ignore[assignment]
+    c._clock = lambda: now[0]
+    try:
+        assert await c.folder_relative_path("acct", "x", "in") is None  # outside, for now
+        tree["x"] = ("Day2", "in")  # moved into IN on Frame.io
+        before = folders.calls
+        assert await c.folder_relative_path("acct", "x", "in") is None  # cached: no new calls
+        assert folders.calls == before
+        now[0] += _FOLDER_META_TTL_S + 1
+        assert await c.folder_relative_path("acct", "x", "in") == "Day2"
+    finally:
+        await c.aclose()
+
+
+async def test_folder_relative_path_reaches_root_at_the_depth_cap() -> None:
+    # A chain exactly _MAX_FOLDER_DEPTH folders deep still reaches the root (no off-by-one).
+    from portal.frameio.client import _MAX_FOLDER_DEPTH
+
+    depth = _MAX_FOLDER_DEPTH
+    tree = {f"f{i}": (f"F{i}", f"f{i - 1}" if i > 1 else "root") for i in range(1, depth + 1)}
+    c = FrameioClient()
+    c._client = ns(folders=_ShowFolders(tree))  # type: ignore[assignment]
+    try:
+        out = await c.folder_relative_path("acct", f"f{depth}", "root")
+        assert out == "/".join(f"F{i}" for i in range(1, depth + 1))
     finally:
         await c.aclose()
 

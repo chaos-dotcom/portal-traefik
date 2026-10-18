@@ -245,6 +245,44 @@ async def test_process_event_fires_callback_per_job() -> None:
     assert seen == [jobs[0].id]
 
 
+async def test_process_event_wakes_a_waiting_job() -> None:
+    # Issue #85: reconcile found the file mid-upload and parked its job in "waiting". The upload's
+    # completion webhook is exactly what it was waiting for — run it now, don't drop the event as
+    # a duplicate and leave the job to its next readiness re-check.
+    rule_id = await _make_rule()
+    async with get_sessionmaker()() as db:
+        waiting = SyncJob(sync_rule_id=rule_id, frameio_file_id="file-1", status="waiting")
+        db.add(waiting)
+        await db.commit()
+        waiting_id = waiting.id
+    event_id = await _make_event(_file_payload())
+    seen: list[uuid.UUID] = []
+
+    async def cb(job_id: uuid.UUID) -> None:
+        seen.append(job_id)
+
+    async with get_sessionmaker()() as db:
+        assert await process_event(db, event_id, on_job_created=cb) == 0  # nothing created
+    assert seen == [waiting_id]
+    assert len(await _jobs()) == 1
+
+
+async def test_process_event_leaves_a_finished_job_alone() -> None:
+    rule_id = await _make_rule()
+    async with get_sessionmaker()() as db:
+        db.add(SyncJob(sync_rule_id=rule_id, frameio_file_id="file-1", status="done"))
+        await db.commit()
+    event_id = await _make_event(_file_payload(event_type="file.ready"))
+    seen: list[uuid.UUID] = []
+
+    async def cb(job_id: uuid.UUID) -> None:
+        seen.append(job_id)
+
+    async with get_sessionmaker()() as db:
+        assert await process_event(db, event_id, on_job_created=cb) == 0
+    assert seen == []
+
+
 async def test_process_event_non_trigger_marks_processed() -> None:
     await _make_rule()
     event_id = await _make_event(_file_payload(event_type="file.updated"))

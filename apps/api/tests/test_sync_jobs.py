@@ -90,6 +90,18 @@ async def test_retry_resets_the_job_and_queues_it(
     assert _no_redis == [job_id]
 
 
+async def test_retry_refuses_a_running_job(client: AsyncClient, _no_redis: list[uuid.UUID]) -> None:
+    # Resetting a running job would queue a second download of the same file next to the live one.
+    await _login(client)
+    job_id = await _make_job(status="running", started_at=datetime.now(UTC))
+
+    resp = await client.post(f"/api/sync-jobs/{job_id}/retry")
+    assert resp.status_code == 409
+    assert _no_redis == []
+    async with get_sessionmaker()() as db:
+        assert (await db.get(SyncJob, job_id)).status == "running"
+
+
 async def test_dismiss_retires_the_job_and_keeps_the_error(client: AsyncClient) -> None:
     await _login(client)
     job_id = await _make_job(error="source never became ready: file status is 'created'")

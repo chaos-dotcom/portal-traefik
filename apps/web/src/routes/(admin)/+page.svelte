@@ -10,17 +10,36 @@
   const recent = $derived(data.transfers.recent as RecentTransfer[]);
   const health = $derived(data.transfers.sync_health);
 
-  let refreshing = $state(false);
+  // Sync jobs queued or downloading right now.
+  const syncing = $derived(health.running + health.queued);
 
-  // Live-refresh the feed while something is uploading, then go quiet.
+  // Live-refresh while anything is in flight: briskly while files upload or sync jobs are queued
+  // or downloading, gently while jobs only wait on Frame.io (or the share), then go quiet.
+  // Stopping the moment the upload finished froze the dashboard while its last files were still
+  // syncing to the NAS, so it read "done" minutes early (issue #85).
+  const refreshMs = $derived(
+    active.length > 0 || syncing > 0 ? 4000 : health.waiting > 0 ? 30_000 : 0,
+  );
+  // A hidden tab doesn't poll (each tick re-runs every load on the page); it catches up the moment
+  // it's shown again.
   $effect(() => {
-    if (active.length === 0) return;
-    const t = setInterval(async () => {
-      refreshing = true;
-      await invalidateAll();
-      refreshing = false;
-    }, 4000);
-    return () => clearInterval(t);
+    if (!refreshMs) return;
+    let busy = false;
+    const refresh = async () => {
+      if (document.hidden || busy) return;
+      busy = true;
+      try {
+        await invalidateAll();
+      } finally {
+        busy = false;
+      }
+    };
+    const t = setInterval(refresh, refreshMs);
+    document.addEventListener("visibilitychange", refresh);
+    return () => {
+      clearInterval(t);
+      document.removeEventListener("visibilitychange", refresh);
+    };
   });
 
   const fmtBytes = (n: number | null): string => (n == null ? "—" : formatBytes(n));
@@ -88,25 +107,17 @@
 
   <!-- Sync health strip -->
   <div class="grid grid-cols-2 gap-3 sm:grid-cols-4">
-    {#if refreshing}
-      {#each Array(4) as _, i (i)}
-        <div class="rounded-card border border-border bg-surface px-4 py-3">
-          <div class="skeleton h-8 w-10 mb-1.5"></div>
-          <div class="skeleton h-3 w-20"></div>
-        </div>
-      {/each}
-    {:else}
-      {#snippet stat(label: string, value: number, tone: string)}
+    <!-- Background refreshes update these numbers in place — no skeleton flash every few seconds. -->
+    {#snippet stat(label: string, value: number, tone: string)}
         <div class="rounded-card border border-border bg-surface px-4 py-3">
           <div class="text-2xl font-semibold {tone}">{value}</div>
           <div class="mt-0.5 text-xs text-muted">{label}</div>
         </div>
       {/snippet}
       {@render stat("Synced (24h)", health.done_24h, "text-text")}
-      {@render stat("In progress", health.running, health.running ? "text-info" : "text-text")}
+      {@render stat("In progress", syncing, syncing ? "text-info" : "text-text")}
       {@render stat("Waiting", health.waiting, health.waiting ? "text-warning" : "text-text")}
       {@render stat("Failed", health.dead_letter, health.dead_letter ? "text-danger" : "text-text")}
-    {/if}
   </div>
 
   {#if health.dead_letter > 0}

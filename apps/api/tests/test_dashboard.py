@@ -88,6 +88,7 @@ async def test_transfers_active_recent_and_health(client: AsyncClient) -> None:
         await db.flush()
         db.add(SyncJob(sync_rule_id=rule.id, frameio_file_id="j1", status="waiting"))
         db.add(SyncJob(sync_rule_id=rule.id, frameio_file_id="j2", status="dead_letter"))
+        db.add(SyncJob(sync_rule_id=rule.id, frameio_file_id="j4", status="pending"))
         db.add(
             SyncJob(
                 sync_rule_id=rule.id,
@@ -109,6 +110,9 @@ async def test_transfers_active_recent_and_health(client: AsyncClient) -> None:
 
     health = data["sync_health"]
     assert health["waiting"] == 1
+    # Issue #85: a queued job is still in flight, so the dashboard mustn't read as all synced.
+    assert health["queued"] == 1
+    assert health["running"] == 0
     assert health["dead_letter"] == 1
     assert health["done_24h"] == 1
 
