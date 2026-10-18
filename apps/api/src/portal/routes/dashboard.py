@@ -44,6 +44,10 @@ class RecentTransfer(BaseModel):
 class SyncHealth(BaseModel):
     waiting: int
     running: int
+    # Queued to run (new, or between retries) but not started yet. Counted apart from "running"
+    # yet still in flight: leaving it out made a just-finished upload read as fully synced while
+    # its last files sat in the queue (issue #85).
+    queued: int = 0
     dead_letter: int
     done_24h: int
     # Rule owning the most recent failure, so the dashboard alert can link to the job list that
@@ -250,6 +254,7 @@ async def transfers(
     sync_health = SyncHealth(
         waiting=status_counts.get("waiting", 0),
         running=status_counts.get("running", 0),
+        queued=status_counts.get("pending", 0),
         dead_letter=status_counts.get("dead_letter", 0),
         done_24h=done_24h,
         dead_letter_rule_id=str(dead_letter_rule_id) if dead_letter_rule_id else None,
