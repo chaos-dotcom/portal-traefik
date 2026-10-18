@@ -343,12 +343,15 @@ async def test_full_upload_session_flow(client: AsyncClient, monkeypatch) -> Non
     link = await _make_link(client, allowed_extensions=["mov"])
     token = link["token"]
 
-    # start a session
+    # start a session (the browser sends the whole batch size up front)
     started = await client.post(
-        f"/api/public/links/{token}/sessions", json={"name": "DIT Berlin"}
+        f"/api/public/links/{token}/sessions", json={"name": "DIT Berlin", "total_bytes": 1000}
     )
     assert started.status_code == 200
     sid = started.json()["session_id"]
+    # Issue #69: the dashboard knows the real total before any file is registered.
+    async with get_sessionmaker()() as db:
+        assert (await db.get(UploadSession, uuid.UUID(sid))).total_bytes == 1000
 
     # request a file upload (with a subfolder path)
     fr = await client.post(
@@ -373,6 +376,10 @@ async def test_full_upload_session_flow(client: AsyncClient, monkeypatch) -> Non
         f"/api/public/links/{token}/sessions/{sid}/complete", json={"total_bytes": 1000}
     )
     assert cs.json()["ok"] is True
+    async with get_sessionmaker()() as db:
+        done = await db.get(UploadSession, uuid.UUID(sid))
+        assert done.status == "completed"
+        assert done.uploaded_bytes == 1000  # not stuck at the last heartbeat
 
 
 class _CapturingUploadClient(_StubUploadClient):

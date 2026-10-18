@@ -13,7 +13,10 @@ import re
 import dns.exception
 import dns.resolver
 
-_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+# One plain address. Besides "@" and whitespace, refuse the characters that make an address list,
+# a display name or a quoted part ("a,b@x.com", "Eve <e@x.com>"): mail would go to every
+# recipient in it while the code proves control of only one.
+_EMAIL_RE = re.compile(r'^[^@\s,;:<>()\[\]"\\]+@[^@\s,;:<>()\[\]"\\]+\.[^@\s,;:<>()\[\]"\\]+$')
 _DNS_TIMEOUT = 5.0
 
 

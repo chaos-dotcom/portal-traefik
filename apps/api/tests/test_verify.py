@@ -31,6 +31,12 @@ def test_valid_syntax() -> None:
     assert not email_check.valid_syntax("ze@")
     assert not email_check.valid_syntax("ze@ze")  # no dot in domain
     assert not email_check.valid_syntax("no-at-sign")
+    # One plain address only: mail would reach every recipient in a list or display-name form,
+    # while the emailed code proves control of just one of them.
+    assert not email_check.valid_syntax("postmaster,me@evil.com")
+    assert not email_check.valid_syntax("a@x.com;b@y.com")
+    assert not email_check.valid_syntax("Eve <eve@evil.com>")
+    assert not email_check.valid_syntax('"q"@x.com')
 
 
 async def test_is_plausible_syntax_only() -> None:

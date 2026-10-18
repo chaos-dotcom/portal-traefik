@@ -21,7 +21,16 @@ async function asJson(res: Response): Promise<any> {
 
 export async function startSession(
   token: string,
-  fields: { name?: string; email?: string; message?: string; password?: string; code?: string },
+  fields: {
+    name?: string;
+    email?: string;
+    message?: string;
+    password?: string;
+    code?: string;
+    // Size of the whole batch, so the dashboard's "Uploading now" shows the real total from the
+    // start instead of one that grows as each file is registered.
+    total_bytes?: number;
+  },
 ): Promise<string> {
   const res = await fetch(`/api/public/links/${token}/sessions`, {
     method: "POST",
@@ -56,16 +65,32 @@ export async function verifyCode(token: string, email: string, code: string): Pr
   if (!res.ok) throw new Error((await asJson(res)).detail ?? "That code is incorrect or expired");
 }
 
+// receipt_to: where the server is emailing the uploader's delivery receipt (verified links only).
+export type CompleteResult = { ok: boolean; receipt_to?: string | null };
+
 export async function completeSession(
   token: string,
   sessionId: string,
   totalBytes: number,
-): Promise<void> {
-  await fetch(`/api/public/links/${token}/sessions/${sessionId}/complete`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ total_bytes: totalBytes }),
-  });
+): Promise<CompleteResult> {
+  // Every file is already delivered by now, so this call failing — even on a dropped connection —
+  // mustn't send the uploader to the error screen and a needless re-upload. Retry briefly (the
+  // server notifies only on the first completion, so a retry can't double-mail), then let it go.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt > 0) await sleep(attempt * 2000);
+    try {
+      const res = await fetch(`/api/public/links/${token}/sessions/${sessionId}/complete`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ total_bytes: totalBytes }),
+      });
+      if (res.ok) return asJson(res);
+      if (res.status < 500) break; // a client error won't improve on retry
+    } catch {
+      // network blip — try again
+    }
+  }
+  return { ok: false };
 }
 
 // Fire-and-forget liveness ping while an upload runs (carries progress for the admin dashboard).
@@ -208,14 +233,14 @@ export async function runUpload(
   sessionId: string,
   items: UploadItem[],
   handlers: ProgressHandlers,
-): Promise<void> {
+): Promise<CompleteResult> {
   for (const item of items) {
     handlers.onFileStart(item.path);
     await uploadOne(token, sessionId, item, handlers.onBytes);
     handlers.onFileDone(item.path);
   }
   const total = items.reduce((sum, it) => sum + it.file.size, 0);
-  await completeSession(token, sessionId, total);
+  return completeSession(token, sessionId, total);
 }
 
 // ── building the file list (preserving folder structure) ──────────────────────
