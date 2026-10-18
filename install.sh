@@ -7,12 +7,13 @@
 # `git clone` the repo and run ./deploy.sh directly.
 #
 #   curl -fsSL https://raw.githubusercontent.com/farbhaus/portal/main/install.sh \
-#     | bash -s -- portal.example.com
+#     | bash -s -- portal.example.com you@example.com
 #
-# Everything after `--` is forwarded to deploy.sh, so all of its flags work:
-#   … | bash -s -- --behind-proxy portal.example.com
+# Everything after `--` is forwarded to deploy.sh, so all of its flags work. The admin email is
+# required: piped through bash there's no terminal to prompt on, so always pass it.
+#   … | bash -s -- --behind-proxy portal.example.com you@example.com
 #   … | bash -s -- --admin-email you@example.com portal.example.com
-#   … | bash -s -- --init-env portal.example.com
+#   … | bash -s -- --init-env portal.example.com you@example.com
 #
 # Env knobs:
 #   PORTAL_REF=main          git ref/tag to fetch the deploy files from

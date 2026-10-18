@@ -23,7 +23,8 @@
 #   --admin-email EMAIL   admin login email (required; alternatively pass it as the 2nd argument).
 #   --update              reuse .env, pull the newest image, recreate (data + live transfers survive).
 #   --init-env            write/refresh .env and exit (no image pull, nothing started).
-#   --yes / -y            skip confirmation prompts.
+#   --yes / -y            never prompt: fail fast if the domain or admin email is missing (for
+#                         unattended provisioning on a terminal; without a TTY it never prompts).
 #
 # Re-running is safe: a complete existing .env is reused as-is (BASE_URL is never overwritten, so a
 # redeploy can't silently change the host). NOTE: ADMIN_PASSWORD seeds the database on the FIRST
@@ -85,6 +86,9 @@ else
   [[ ${#POSITIONAL[@]} -ge 1 ]] && DOMAIN="${POSITIONAL[0]}"
   [[ ${#POSITIONAL[@]} -ge 2 && -z "$ADMIN_EMAIL_ARG" ]] && ADMIN_EMAIL_ARG="${POSITIONAL[1]}"
 fi
+
+# Prompt only on a real terminal, and never with --yes (an unattended run must not block on input).
+can_prompt() { [[ -t 0 && $ASSUME_YES -eq 0 ]]; }
 
 # Privilege prefix for host-level changes (installing packages, firewall).
 SUDO=""
@@ -245,7 +249,7 @@ if [[ -n "$BEHIND_PROXY" ]]; then MODE="proxy"; else MODE="standalone"; fi
 if [[ -z "$DOMAIN" ]]; then
   # `|| true`: under `set -e`, read returns non-zero at EOF (e.g. `curl … | bash` has no TTY),
   # which would otherwise abort here instead of giving the clear message below.
-  [[ -t 0 ]] && read -rp "Public domain (e.g. portal.example.com): " DOMAIN || true
+  can_prompt && read -rp "Public domain (e.g. portal.example.com): " DOMAIN || true
 fi
 [[ -n "$DOMAIN" ]] || die "a public domain is required. Pass it as an argument: ./deploy.sh portal.example.com"
 
@@ -255,8 +259,10 @@ if [[ "$DOMAIN" == "localhost" ]]; then
   [[ "$MODE" == "standalone" ]] || die "'localhost' only makes sense for standalone local testing; drop --behind-proxy."
 elif [[ "$DOMAIN" == *://* || "$DOMAIN" == */* || "$DOMAIN" =~ [[:space:]] ]]; then
   die "'$DOMAIN' is not a bare hostname. Use e.g. portal.example.com — no https://, no path, no port."
-elif [[ "$DOMAIN" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ || "$DOMAIN" == *:* ]]; then
+elif [[ "$DOMAIN" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ || "$DOMAIN" == *:*:* ]]; then
   die "bare IPs aren't supported (no Let's Encrypt TLS). Use 'localhost' for local testing or a real domain like portal.example.com."
+elif [[ "$DOMAIN" == *:* ]]; then
+  die "'$DOMAIN' includes a port. Pass the bare hostname (e.g. portal.example.com); behind a proxy, set the loopback port with --port."
 elif [[ ! "$DOMAIN" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$ ]]; then
   die "'$DOMAIN' is not a bare hostname. Use e.g. portal.example.com — no https://, no path, no port."
 fi
@@ -297,17 +303,17 @@ if [[ -f .env ]]; then
     info "      To switch host: edit BASE_URL in .env (and the mode knobs if changing how TLS is served), or start from a fresh .env."
   fi
 else
-  info "Generating .env for $DOMAIN ($MODE mode)"
-  cp .env.example .env
-  ADMIN_PASSWORD="$(gen_password)"
   # The admin email is REQUIRED — it's the login identity. Take it from --admin-email / the 2nd
   # positional, else prompt on a real terminal, else fail clearly (can't prompt under `curl … |
-  # bash`, whose stdin is the pipe). A new strong password is generated and shown once below.
+  # bash`, whose stdin is the pipe). Settled before .env is written, so a failure here leaves no
+  # half-filled template behind. A new strong password is generated and shown once below.
   admin_email="$ADMIN_EMAIL_ARG"
   if [[ -z "$admin_email" ]]; then
-    if [[ -t 0 ]]; then
+    if can_prompt; then
       while [[ -z "$admin_email" ]]; do
-        read -rp "Admin email (your login for $DOMAIN): " admin_email || true
+        # EOF (Ctrl-D) must end the run — retrying a closed stdin would spin forever.
+        read -rp "Admin email (your login for $DOMAIN): " admin_email \
+          || { echo; die "no admin email entered."; }
         if [[ -n "$admin_email" && ! "$admin_email" =~ ^[^@[:space:]]+@[^@[:space:]]+$ ]]; then
           echo "  '$admin_email' doesn't look like an email — try again."; admin_email=""
         fi
@@ -317,6 +323,10 @@ else
     fi
   fi
   [[ "$admin_email" =~ ^[^@[:space:]]+@[^@[:space:]]+$ ]] || die "'$admin_email' is not a valid email address."
+
+  info "Generating .env for $DOMAIN ($MODE mode)"
+  cp .env.example .env
+  ADMIN_PASSWORD="$(gen_password)"
   set_env BASE_URL       "https://$DOMAIN"
   set_env ADMIN_EMAIL    "$admin_email"
   set_env ADMIN_PASSWORD "$ADMIN_PASSWORD"
@@ -361,14 +371,16 @@ $DOCKER compose pull \
 [[ "$MODE" == "standalone" ]] && open_firewall
 
 # --- deploy -----------------------------------------------------------------
+# Note whether the data volume predates this deploy BEFORE `up` creates it — checked afterwards it
+# always exists, and every fresh install was warned its new admin password might not be active.
+data_exists=0
+$DOCKER volume inspect portal_portal_data >/dev/null 2>&1 && data_exists=1 || true
 ensure_sync_root
 info "Starting Portal"
 $DOCKER compose up -d
 wait_healthy || die "deploy failed — the container is not healthy (see logs above)."
 
 # --- summary ----------------------------------------------------------------
-data_exists=0
-$DOCKER volume inspect portal_portal_data >/dev/null 2>&1 && data_exists=1 || true
 echo
 echo "============================================================"
 echo " Portal deployed: https://$DOMAIN"
