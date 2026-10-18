@@ -15,13 +15,18 @@ import dns.resolver
 
 # One plain address. Besides "@" and whitespace, refuse the characters that make an address list,
 # a display name or a quoted part ("a,b@x.com", "Eve <e@x.com>"): mail would go to every
-# recipient in it while the code proves control of only one.
-_EMAIL_RE = re.compile(r'^[^@\s,;:<>()\[\]"\\]+@[^@\s,;:<>()\[\]"\\]+\.[^@\s,;:<>()\[\]"\\]+$')
+# recipient in it while the code proves control of only one. The domain is matched label by label
+# (labels can't contain dots), so there is exactly one way to split it and matching stays linear —
+# a pattern that let labels swallow dots backtracked polynomially on crafted input (ReDoS).
+_NOT_SPECIAL = r'[^@\s,;:<>()\[\]"\\'
+_EMAIL_RE = re.compile(rf"^{_NOT_SPECIAL}]+@{_NOT_SPECIAL}.]+(?:\.{_NOT_SPECIAL}.]+)+$")
+_MAX_EMAIL_LENGTH = 254  # RFC 5321's limit for a deliverable address
 _DNS_TIMEOUT = 5.0
 
 
 def valid_syntax(email: str) -> bool:
-    return bool(_EMAIL_RE.match(email.strip()))
+    email = email.strip()
+    return len(email) <= _MAX_EMAIL_LENGTH and bool(_EMAIL_RE.match(email))
 
 
 def _domain_receives_mail(domain: str) -> bool:

@@ -197,7 +197,7 @@ async def _make_download_link() -> str:
 
 async def test_download_verify_flow(client: AsyncClient, monkeypatch: Any) -> None:
     sent = _enable_email(monkeypatch)
-    monkeypatch.setattr(pubdl, "get_frameio_client", lambda: _StubClient())
+    monkeypatch.setattr(pubdl, "get_frameio_client", _StubClient)
     token = await _make_download_link()
 
     r = await client.post(f"/api/public/downloads/{token}/request-code", json={"email": "c@x.com"})
@@ -225,7 +225,7 @@ async def test_download_does_not_mint_trust_for_an_unverified_viewer(
     (cookie gone, or the link switched verification on after the session began) the viewer email
     is unproven here, and a cookie for it would also pass upload links' verification."""
     sent = _enable_email(monkeypatch)
-    monkeypatch.setattr(pubdl, "get_frameio_client", lambda: _StubClient())
+    monkeypatch.setattr(pubdl, "get_frameio_client", _StubClient)
     token = await _make_download_link()
     await client.post(f"/api/public/downloads/{token}/request-code", json={"email": "c@x.com"})
     ok = await client.post(

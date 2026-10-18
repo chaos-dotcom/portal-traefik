@@ -37,6 +37,20 @@ def test_valid_syntax() -> None:
     assert not email_check.valid_syntax("a@x.com;b@y.com")
     assert not email_check.valid_syntax("Eve <eve@evil.com>")
     assert not email_check.valid_syntax('"q"@x.com')
+    assert not email_check.valid_syntax("a@b..com")  # empty domain label
+    assert not email_check.valid_syntax("a" * 250 + "@b.co")  # over the 254-char limit
+
+
+def test_valid_syntax_is_not_redos_prone() -> None:
+    # The input CodeQL flagged (py/polynomial-redos): a domain of many "!." repetitions with no
+    # valid end. Matched label by label it fails in linear time instead of backtracking.
+    import time
+
+    evil = "!@!." + "!." * 6000 + "@"  # ~12k chars: the old pattern took ~0.8s on this
+    started = time.perf_counter()
+    assert email_check._EMAIL_RE.match(evil) is None  # the pattern itself, past the length cap
+    assert time.perf_counter() - started < 0.1
+    assert not email_check.valid_syntax(evil)
 
 
 async def test_is_plausible_syntax_only() -> None:
