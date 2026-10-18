@@ -102,3 +102,19 @@ async def test_trigger_empty_file_ids(enqueued: list[uuid.UUID]) -> None:
     await _make_rule()
     assert await events.trigger_sync_for_upload("a1", "fld-1", []) == 0
     assert enqueued == []
+
+
+async def test_trigger_nudges_a_waiting_job(enqueued: list[uuid.UUID]) -> None:
+    # Issue #85: reconcile found the file mid-upload and parked its job in "waiting". When the
+    # upload completes, the job must be re-enqueued now, not left for its next readiness poll.
+    rule_id = await _make_rule()
+    async with get_sessionmaker()() as db:
+        waiting = SyncJob(sync_rule_id=rule_id, frameio_file_id="f1", status="waiting")
+        done = SyncJob(sync_rule_id=rule_id, frameio_file_id="f2", status="done")
+        db.add_all([waiting, done])
+        await db.commit()
+        waiting_id = waiting.id
+
+    assert await events.trigger_sync_for_upload("a1", "fld-1", ["f1", "f2"]) == 0
+    assert enqueued == [waiting_id]  # the done job is left alone
+    assert await _job_count() == 2

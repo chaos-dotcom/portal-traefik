@@ -17,7 +17,8 @@ from typing import Any
 import httpx
 from arq import cron
 from arq.connections import RedisSettings
-from sqlalchemy import select
+from sqlalchemy import select, update
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from portal.db.models import SyncJob, SyncRule
 from portal.db.session import get_sessionmaker
@@ -38,8 +39,9 @@ from portal.sync.runner import (
 
 log = get_logger("worker")
 
-# Terminal job states the worker never re-runs.
-_TERMINAL = {"done", "skipped", "dead_letter"}
+# Job states a task may pick up. Terminal ones (done/skipped/dead_letter) never re-run, and a
+# "running" job already has a task working on it.
+_CLAIMABLE = ("pending", "waiting")
 
 
 def _unwrap_error(exc: BaseException) -> str:
@@ -61,17 +63,50 @@ async def process_webhook_event(ctx: dict[str, Any], event_id: str) -> int:
         return await process_event(db, uuid.UUID(event_id), on_job_created=_enqueue)
 
 
-async def run_sync_job(ctx: dict[str, Any], job_id: str) -> str:
-    """Download one file. On failure, retry with exponential backoff; dead-letter after the cap."""
+async def _follow_up(ctx: dict[str, Any], db: AsyncSession, job: SyncJob, defer_s: int) -> None:
+    """Schedule the job's next attempt (a readiness re-check or a retry backoff).
+
+    Called after the commit that recorded this attempt's outcome. The task carries the job's
+    ``updated_at`` as of that commit — read back from the database, so worker/DB clock skew can't
+    matter — and only runs if nothing has touched the job since (see ``run_sync_job``).
+    """
+    as_of = await db.scalar(select(SyncJob.updated_at).where(SyncJob.id == job.id))
+    if as_of is None:  # the job (or its rule) was deleted meanwhile: nothing left to follow up
+        return
+    await ctx["redis"].enqueue_job(RUN_SYNC_JOB, str(job.id), as_of.isoformat(), _defer_by=defer_s)
+
+
+async def run_sync_job(ctx: dict[str, Any], job_id: str, as_of: str | None = None) -> str:
+    """Download one file. On failure, retry with exponential backoff; dead-letter after the cap.
+
+    ``as_of`` is set on the follow-ups this task schedules for itself (see ``_follow_up``); a
+    fresh request to run the job (a new file, a wake-up, a reset, a manual retry) has none.
+    """
     settings = get_settings()
     http: httpx.AsyncClient = ctx["http"]
     async with get_sessionmaker()() as db:
-        job = await db.get(SyncJob, uuid.UUID(job_id))
-        if job is None or job.status in _TERMINAL:
-            return "skip"
-        job.status = "running"
-        job.started_at = datetime.now(UTC)
+        # Claim the job atomically. A job can have more than one task queued for it (a readiness
+        # re-check plus an arrival wake-up, or a reconcile re-pick); only one may run it, or two
+        # downloads would race on the same .part file. Terminal and already-running jobs are left
+        # alone — orphaned "running" jobs are re-picked by reclaim/reconcile resetting them first.
+        claim = [SyncJob.id == uuid.UUID(job_id), SyncJob.status.in_(_CLAIMABLE)]
+        if as_of is not None:
+            # A follow-up runs only if the job is still as its own attempt left it. Anything that
+            # touched it since (a wake-up, a reconcile reset, a manual retry) ran the job itself and
+            # scheduled its own follow-up, so this one is superseded: running it as well would
+            # keep two re-check chains alive for the rest of the wait.
+            claim.append(SyncJob.updated_at <= datetime.fromisoformat(as_of))
+        claimed = await db.scalar(
+            update(SyncJob)
+            .where(*claim)
+            .values(status="running", started_at=datetime.now(UTC))
+            .returning(SyncJob.id)
+        )
         await db.commit()
+        if claimed is None:
+            return "skip"
+        job = await db.get(SyncJob, claimed)
+        assert job is not None
 
         try:
             await execute_job(db, job, backend=FrameioStorageBackend(), http=http)
@@ -105,7 +140,7 @@ async def run_sync_job(ctx: dict[str, Any], job_id: str) -> str:
             job.error = str(exc)
             await db.commit()
             poll = settings.sync_source_poll_seconds
-            await ctx["redis"].enqueue_job(RUN_SYNC_JOB, job_id, _defer_by=poll)
+            await _follow_up(ctx, db, job, poll)
             log.info("sync.job.waiting_source", job_id=job_id, poll_s=poll)
             return "waiting"
         except DestinationUnavailable as exc:
@@ -117,7 +152,7 @@ async def run_sync_job(ctx: dict[str, Any], job_id: str) -> str:
             job.error = str(exc)
             await db.commit()
             poll = settings.sync_source_poll_seconds
-            await ctx["redis"].enqueue_job(RUN_SYNC_JOB, job_id, _defer_by=poll)
+            await _follow_up(ctx, db, job, poll)
             log.warning("sync.job.destination_unavailable", job_id=job_id, poll_s=poll)
             return "waiting"
         except Exception as exc:  # noqa: BLE001 - turn any failure into retry/dead-letter
@@ -132,7 +167,7 @@ async def run_sync_job(ctx: dict[str, Any], job_id: str) -> str:
             job.status = "pending"
             await db.commit()
             defer = settings.sync_retry_base_seconds * (2 ** (job.retry_count - 1))
-            await ctx["redis"].enqueue_job(RUN_SYNC_JOB, job_id, _defer_by=defer)
+            await _follow_up(ctx, db, job, defer)
             log.info("sync.job.retry", job_id=job_id, attempt=job.retry_count, defer_s=defer)
             return "retry"
 

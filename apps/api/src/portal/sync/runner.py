@@ -24,7 +24,7 @@ from portal.db.models import SyncJob, SyncRule
 from portal.frameio.client import FrameioForbidden, FrameioNotFound
 from portal.lib.config import get_settings
 from portal.lib.logging import get_logger
-from portal.storage.base import DestinationConfig, StorageBackend
+from portal.storage.base import DestinationConfig, RemoteFile, StorageBackend
 from portal.sync.destination import arm_destination, check_destination
 from portal.sync.download import download_to_file
 from portal.sync.paths import PathContext, resolve_conflict, resolve_destination
@@ -38,6 +38,11 @@ EnqueueJob = Callable[[uuid.UUID], Awaitable[None]]
 # finishes, so we don't make the user wait for transcode. If the original still isn't ready we get
 # a 403, which we treat as "not ready yet" (patient wait) rather than a failure — see execute_job.
 DOWNLOADABLE_STATUSES = frozenset({"uploaded", "transcoded"})
+
+# Error recorded on a job skipped because its file isn't inside the rule's folder. Not final:
+# files and folders get moved, so reconcile re-runs such a job once the file shows up in the
+# rule's own listing.
+OUT_OF_SCOPE = "outside the rule's source folder"
 
 
 def _is_not_ready_403(exc: BaseException) -> bool:
@@ -69,23 +74,36 @@ def _is_orphaned(job: SyncJob, now: datetime, stale_after_seconds: int) -> bool:
 
 
 def _is_stranded_pending(job: SyncJob, now: datetime, stale_after_seconds: int) -> bool:
-    """A job sitting "pending" that no worker ever started means its queued task was lost — the
-    worker restarted between the row being written and the task being picked up, or the queued task
-    expired. Nothing else will ever pick it up: the enqueue happened once and reconcile otherwise
-    leaves pending jobs alone, so the file strands forever. Measured from ``updated_at`` (bumped
-    whenever the row is touched) so a job re-enqueued moments ago isn't immediately re-queued again.
+    """A "pending" job waits on a queued task — its first run, or the retry its last failure
+    scheduled. Untouched for longer than any such task takes to come due, that task was lost (the
+    worker restarted before picking it up, or the queued task expired), and nothing else will ever
+    run the job: the file strands forever. Measured from ``updated_at`` (bumped whenever the row is
+    touched) so a job re-enqueued moments ago isn't immediately re-queued again.
     """
-    if job.status != "pending" or job.started_at is not None:
+    if job.status != "pending":
         return False
     return (now - job.updated_at).total_seconds() > stale_after_seconds
 
 
-def _in_scope(rule: SyncRule, parent_id: str | None) -> bool:
-    """A non-recursive rule only takes files directly in its folder; recursive takes everything
-    the source listing returns (we can't cheaply prove descendant-ship from a webhook event)."""
+def _is_stranded_waiting(job: SyncJob, now: datetime, stale_after_seconds: int) -> bool:
+    """A "waiting" job is re-checked every ``sync_source_poll_seconds`` and each check touches the
+    row, so one untouched for far longer has lost its scheduled re-check (the queued task was
+    dropped, or the run that superseded it died) and would otherwise wait forever."""
+    if job.status != "waiting":
+        return False
+    return (now - job.updated_at).total_seconds() > stale_after_seconds
+
+
+def _in_scope(rule: SyncRule, remote: RemoteFile) -> bool:
+    """A non-recursive rule only takes files directly in its folder; a recursive one takes files
+    anywhere beneath it. Webhooks and upload triggers match a whole project, so this is the check
+    that keeps a sibling folder (e.g. OUT next to a rule on IN) from syncing into the destination:
+    ``relative_dir`` is None when the file's ancestry never reaches the rule's folder."""
+    if remote.relative_dir is None:
+        return False
     if rule.source_config.get("recursive", True):
         return True
-    return parent_id == rule.source_config.get("folder_id")
+    return remote.parent_id == rule.source_config.get("folder_id")
 
 
 async def execute_job(
@@ -121,22 +139,24 @@ async def execute_job(
         log.info("sync.job.skipped_source_gone", job_id=str(job.id), file_id=job.frameio_file_id)
         return
 
+    # Scope first: a file outside the rule's folder is never synced, so don't wait on it.
+    if not _in_scope(rule, remote):
+        job.status = "skipped"
+        job.completed_at = datetime.now(UTC)
+        job.error = OUT_OF_SCOPE
+        log.info("sync.job.skipped_out_of_scope", job_id=str(job.id), file_id=job.frameio_file_id)
+        return
+
     # Wait for the original to be downloadable. Frame.io reports a status; if it's not yet a
     # downloadable one, defer (the worker re-queues patiently without burning the retry budget).
     if remote.status is not None and remote.status not in DOWNLOADABLE_STATUSES:
         raise SourceNotReady(f"file status is '{remote.status}', not yet downloadable")
 
-    if not _in_scope(rule, remote.parent_id):
-        job.status = "skipped"
-        job.completed_at = datetime.now(UTC)
-        log.info("sync.job.skipped_out_of_scope", job_id=str(job.id), file_id=job.frameio_file_id)
-        return
-
     ctx = PathContext(
         filename=remote.name,
         project=str(rule.source_config.get("project_name", "")),
         folder=str(rule.source_config.get("folder_name", "")),
-        subfolder=remote.relative_dir,
+        subfolder=remote.relative_dir or "",
         when=datetime.now(),
     )
     target = resolve_destination(rule.destination_path, rule.path_template, ctx)
@@ -226,9 +246,16 @@ async def reconcile_rule(
     now = datetime.now(UTC)
     settings = get_settings()
     stale_after = settings.sync_job_timeout_seconds
-    pending_stale_after = settings.sync_pending_stale_seconds
+    # Comfortably past any live task's due time (the longest retry backoff, the re-check cadence),
+    # so only a job that lost its queued task qualifies.
+    stale_floor = settings.sync_pending_stale_seconds
+    longest_backoff = settings.sync_retry_base_seconds * 2 ** max(settings.sync_max_retries - 2, 0)
+    pending_stale_after = max(stale_floor, 3 * longest_backoff)
+    waiting_stale_after = max(stale_floor, 3 * settings.sync_source_poll_seconds)
 
-    created = 0
+    # Enqueue only after the commit: a listing takes a while, and a worker that picks up a task
+    # for a row it can't see yet drops it, stranding the file until the stale-pending check.
+    to_enqueue: list[uuid.UUID] = []
     for f in files:
         existing = await db.scalar(
             select(SyncJob).where(
@@ -239,15 +266,19 @@ async def reconcile_rule(
             job = SyncJob(sync_rule_id=rule.id, frameio_file_id=f.id, status="pending")
             db.add(job)
             await db.flush()
-            await enqueue(job.id)
-            created += 1
+            to_enqueue.append(job.id)
         elif (
             existing.status == "dead_letter"
             or _is_orphaned(existing, now, stale_after)
             or _is_stranded_pending(existing, now, pending_stale_after)
+            or _is_stranded_waiting(existing, now, waiting_stale_after)
+            # The file was skipped as outside the rule's folder, yet it's in the rule's listing:
+            # it has been moved in since, so it's due a sync after all.
+            or (existing.status == "skipped" and existing.error == OUT_OF_SCOPE)
         ):
             # Self-heal: a transient failure (a network blip), a job left "running" by a killed
-            # worker, or one whose queued task was lost shouldn't strand a file. Reset + re-attempt.
+            # worker, one whose queued task (or re-check) was lost, or a file moved into the folder
+            # shouldn't strand a file. Reset + re-attempt.
             existing.status = "pending"
             existing.retry_count = 0
             existing.error = None
@@ -257,11 +288,13 @@ async def reconcile_rule(
             # job measures its wait from an old clock and expires again on its first tick.
             existing.source_wait_started_at = None
             await db.flush()
-            await enqueue(existing.id)
-            created += 1
+            to_enqueue.append(existing.id)
         # done / skipped / waiting / fresh-pending / fresh-running: leave as-is
 
     await db.commit()
+    for job_id in to_enqueue:
+        await enqueue(job_id)
+    created = len(to_enqueue)
     if created:
         log.info("sync.reconcile.created", rule_id=str(rule_id), count=created)
     return created
