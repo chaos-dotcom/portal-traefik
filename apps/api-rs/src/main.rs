@@ -6,6 +6,7 @@ mod auth;
 mod config;
 mod crypto;
 mod common;
+mod migrate;
 mod notify;
 mod error;
 mod routes;
@@ -33,11 +34,16 @@ use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let settings = Settings::from_env();
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| settings.log_filter().into()))
         .init();
 
-    let settings = Settings::from_env();
+    // `portal-api migrate` — create or upgrade the schema; run by the entrypoint before seeding.
+    if std::env::args().nth(1).as_deref() == Some("migrate") {
+        return migrate::migrate(&settings.database_url).await;
+    }
+
     let db = sqlx::postgres::PgPoolOptions::new()
         .max_connections(10)
         .connect(&settings.database_url)
@@ -149,7 +155,15 @@ async fn main() -> anyhow::Result<()> {
         .route("/settings/totp/enable", post(routes::security::totp_enable))
         .route("/settings/totp/disable", post(routes::security::totp_disable))
         .route("/settings/branding", get(routes::security::branding_status).post(routes::security::update_branding))
-        .route("/settings/branding/logo", post(routes::security::upload_logo).delete(routes::security::delete_logo))
+        .route(
+            "/settings/branding/logo",
+            // axum caps bodies at 2 MB by default; Starlette doesn't cap them at all. Allow the
+            // configured logo size plus room for the multipart envelope, so an oversized logo
+            // gets the handler's "exceeds the maximum size" rather than a bare 413.
+            post(routes::security::upload_logo)
+                .layer(axum::extract::DefaultBodyLimit::max(state.settings.branding_logo_max_bytes.saturating_mul(2).saturating_add(1 << 20)))
+                .delete(routes::security::delete_logo),
+        )
         .route("/frameio/status", get(routes::account::frameio_status))
         .route("/frameio/oauth/connect", get(routes::frameio::connect))
         .route("/frameio/oauth/callback", get(routes::frameio::callback))
@@ -179,6 +193,9 @@ async fn main() -> anyhow::Result<()> {
 
     let app = Router::new()
         .nest("/api", api)
+        // Public link pages: the shell, titled and statused per link (see spa::public_page).
+        .route("/u/{token}", get(spa::upload_page))
+        .route("/d/{token}", get(spa::download_page))
         .fallback_service(static_service)
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),

@@ -12,6 +12,12 @@ pub struct Settings {
     pub session_secret: String,
     /// `SESSION_COOKIE_SECURE` — adds `secure` to the Set-Cookie flags (default true).
     pub session_cookie_secure: bool,
+    /// `SESSION_COOKIE_NAME` — the admin session cookie's name.
+    pub session_cookie_name: String,
+    /// `BRANDING_LOGO_MAX_BYTES` — the largest app logo an admin may upload.
+    pub branding_logo_max_bytes: usize,
+    /// `LOG_LEVEL` — Python's level name (DEBUG/INFO/WARNING/ERROR); `RUST_LOG` wins when set.
+    pub log_level: String,
     /// Public base URL (`BASE_URL`), used to build link `public_url`s.
     pub base_url: String,
     /// `TOKEN_ENCRYPTION_KEY` — AES key material for secrets at rest.
@@ -114,6 +120,16 @@ impl Settings {
         )
     }
 
+    /// The tracing filter for `LOG_LEVEL`, mapping Python's level names onto tracing's.
+    pub fn log_filter(&self) -> &'static str {
+        match self.log_level.trim().to_ascii_uppercase().as_str() {
+            "DEBUG" => "debug",
+            "WARNING" | "WARN" => "warn",
+            "ERROR" | "CRITICAL" => "error",
+            _ => "info",
+        }
+    }
+
     pub fn resolved_frameio_redirect_uri(&self) -> String {
         if self.frameio_redirect_uri.is_empty() {
             format!("{}/api/frameio/oauth/callback", self.base_url.trim_end_matches('/'))
@@ -143,6 +159,9 @@ impl Settings {
             session_secret: std::env::var("SESSION_SECRET")
                 .unwrap_or_else(|_| "change-me-session-secret".to_string()),
             session_cookie_secure,
+            session_cookie_name: std::env::var("SESSION_COOKIE_NAME").unwrap_or_else(|_| "portal_session".to_string()),
+            branding_logo_max_bytes: env_i64("BRANDING_LOGO_MAX_BYTES", 2 * 1024 * 1024).max(0) as usize,
+            log_level: std::env::var("LOG_LEVEL").unwrap_or_else(|_| "INFO".to_string()),
             base_url: std::env::var("BASE_URL")
                 .unwrap_or_else(|_| "http://127.0.0.1:18080".to_string()),
             token_encryption_key: std::env::var("TOKEN_ENCRYPTION_KEY")

@@ -57,19 +57,30 @@ pub async fn branding_status(State(state): State<AppState>, _: Admin) -> Respons
 }
 
 pub async fn upload_logo(State(state): State<AppState>, admin: Admin, mut multipart: Multipart) -> Response {
+    let max_bytes = state.settings.branding_logo_max_bytes;
+    let too_large = || detail(StatusCode::BAD_REQUEST, &format!("Logo exceeds the maximum size ({} KB)", max_bytes / 1024));
     let mut data: Option<Vec<u8>> = None;
-    while let Ok(Some(field)) = multipart.next_field().await {
-        if field.name() == Some("file") {
-            data = field.bytes().await.ok().map(|b| b.to_vec());
-            break;
+    loop {
+        match multipart.next_field().await {
+            Ok(Some(field)) if field.name() == Some("file") => {
+                match field.bytes().await {
+                    Ok(b) => data = Some(b.to_vec()),
+                    // The body outgrew the route's DefaultBodyLimit (main.rs).
+                    Err(e) if e.status() == StatusCode::PAYLOAD_TOO_LARGE => return too_large(),
+                    Err(_) => {}
+                }
+                break;
+            }
+            Ok(Some(_)) => continue,
+            Err(e) if e.status() == StatusCode::PAYLOAD_TOO_LARGE => return too_large(),
+            _ => break,
         }
     }
     let Some(data) = data else {
         return detail(StatusCode::UNPROCESSABLE_ENTITY, "Field required");
     };
-    let max_bytes = 2 * 1024 * 1024usize; // BRANDING_LOGO_MAX_BYTES default
     if data.len() > max_bytes {
-        return detail(StatusCode::BAD_REQUEST, &format!("Logo exceeds the maximum size ({} KB)", max_bytes / 1024));
+        return too_large();
     }
     if !data.starts_with(&PNG_MAGIC) {
         return detail(StatusCode::BAD_REQUEST, "Logo must be a PNG file");

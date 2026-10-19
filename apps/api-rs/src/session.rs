@@ -26,7 +26,6 @@ use sha1::Sha1;
 
 const SALT: &[u8] = b"itsdangerous.Signer";
 const SEP: u8 = b'.';
-pub const SESSION_COOKIE: &str = "portal_session";
 pub const MAX_AGE: i64 = 14 * 24 * 60 * 60;
 
 #[derive(Default)]
@@ -131,17 +130,23 @@ pub fn unsign(secret: &[u8], signed: &str, max_age: Option<i64>) -> Option<Vec<u
     Some(payload.to_vec())
 }
 
+fn security_flags(secure: bool) -> &'static str {
+    if secure { "httponly; samesite=lax; secure" } else { "httponly; samesite=lax" }
+}
+
 /// Build the `Set-Cookie` value Starlette writes when the session was modified.
-pub fn set_cookie(secret: &[u8], data: &Map<String, Value>, secure: bool) -> String {
+pub fn set_cookie(name: &str, secret: &[u8], data: &Map<String, Value>, secure: bool) -> String {
     // Python `json.dumps` defaults: ", " and ": " separators.
     let json = python_json(data);
     let payload = STANDARD.encode(json.as_bytes());
     let signed = sign(secret, payload.as_bytes());
-    let mut flags = "httponly; samesite=lax".to_string();
-    if secure {
-        flags.push_str("; secure");
-    }
-    format!("{SESSION_COOKIE}={signed}; path=/; Max-Age={MAX_AGE}; {flags}")
+    format!("{name}={signed}; path=/; Max-Age={MAX_AGE}; {}", security_flags(secure))
+}
+
+/// The `Set-Cookie` Starlette writes when a session that had data was cleared (logout): it
+/// expires the browser's copy, which would otherwise stay valid until its Max-Age.
+pub fn clear_cookie(name: &str, secure: bool) -> String {
+    format!("{name}=null; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT; {}", security_flags(secure))
 }
 
 
@@ -214,7 +219,7 @@ pub async fn session_middleware(
         .headers()
         .get(header::COOKIE)
         .and_then(|v| v.to_str().ok())
-        .and_then(|h| parse_cookie(h, SESSION_COOKIE));
+        .and_then(|h| parse_cookie(h, &state.settings.session_cookie_name));
 
     let mut session = SessionState::default();
     if let Some(cookie) = decoded
@@ -240,11 +245,43 @@ pub async fn session_middleware(
             .headers_mut()
             .append(header::VARY, HeaderValue::from_static("Cookie"));
     }
-    if s.modified && !s.data.is_empty() {
-        let value = set_cookie(secret.as_bytes(), &s.data, secure);
-        if let Ok(hv) = HeaderValue::from_str(&value) {
-            response.headers_mut().append(header::SET_COOKIE, hv);
-        }
+    let name = &state.settings.session_cookie_name;
+    let cookie = if s.modified && !s.data.is_empty() {
+        Some(set_cookie(name, secret.as_bytes(), &s.data, secure))
+    } else if s.modified && !s.initial_empty {
+        Some(clear_cookie(name, secure))
+    } else {
+        None
+    };
+    if let Some(hv) = cookie.and_then(|c| HeaderValue::from_str(&c).ok()) {
+        response.headers_mut().append(header::SET_COOKIE, hv);
     }
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cleared_session_expires_the_cookie_like_starlette() {
+        // starlette.middleware.sessions: "{name}=null; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT; {flags}"
+        assert_eq!(
+            clear_cookie("portal_session", false),
+            "portal_session=null; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT; httponly; samesite=lax"
+        );
+        assert_eq!(
+            clear_cookie("my_cookie", true),
+            "my_cookie=null; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT; httponly; samesite=lax; secure"
+        );
+    }
+
+    #[test]
+    fn issued_cookie_uses_the_configured_name() {
+        let mut data = Map::new();
+        data.insert("user_id".into(), Value::String("u".into()));
+        let c = set_cookie("custom_name", b"secret", &data, true);
+        assert!(c.starts_with("custom_name="), "{c}");
+        assert!(c.ends_with(&format!("; path=/; Max-Age={MAX_AGE}; httponly; samesite=lax; secure")), "{c}");
+    }
 }
