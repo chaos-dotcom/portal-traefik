@@ -13,7 +13,20 @@ updates:
       actions:
         patterns: [ "*" ]
 
-  # Backend Python deps — uv ecosystem reads pyproject.toml + uv.lock directly.
+  # Rust API deps (what the image ships) — Cargo.toml + Cargo.lock.
+  - package-ecosystem: cargo
+    directory: /apps/api-rs
+    schedule:
+      interval: weekly
+    ignore:
+      - dependency-name: "*"
+        update-types: [ "version-update:semver-major" ]
+    groups:
+      rust:
+        patterns: [ "*" ]
+        update-types: [ "minor", "patch" ]
+
+  # Python reference API deps — uv ecosystem reads pyproject.toml + uv.lock directly.
   - package-ecosystem: uv
     directory: /apps/api
     schedule:

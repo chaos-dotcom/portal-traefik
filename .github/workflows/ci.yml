@@ -1,7 +1,8 @@
 # Lint, type-check, test the backend and build + check the frontend.
 # Backend uses uv with the committed uv.lock so CI matches the deployed image.
-# The Rust API (apps/api-rs) gets clippy + tests on the toolchain Dockerfile.rust builds with, and a
-# check that its schema snapshot still matches the Alembic migrations.
+# The Rust API (apps/api-rs, what the image ships) gets clippy + tests on the toolchain the
+# Dockerfile builds with, and a check that its schema files still match the Alembic migrations.
+# The Python API (apps/api) stays as the reference implementation and where migrations are written.
 name: CI
 
 on:
@@ -17,7 +18,7 @@ concurrency:
 
 jobs:
   backend:
-    name: Backend — lint, types & tests
+    name: Python reference API — lint, types & tests
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -88,7 +89,7 @@ jobs:
         working-directory: apps/api-rs
     steps:
       - uses: actions/checkout@v7
-      - name: Set up Rust (same toolchain as Dockerfile.rust)
+      - name: Set up Rust (same toolchain as the Dockerfile)
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: '1.98'
@@ -105,7 +106,7 @@ jobs:
         run: cargo test --locked
 
   rust-schema:
-    name: Rust API — schema.sql matches Alembic
+    name: Rust API — schema files match Alembic
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -114,5 +115,5 @@ jobs:
         with:
           enable-cache: true
           cache-dependency-glob: apps/api/uv.lock
-      - name: Compare schema.sql with a freshly migrated database
+      - name: Compare schema.sql and migrations/ with freshly migrated databases
         run: tools/rustify/schema_check.sh

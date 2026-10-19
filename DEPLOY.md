@@ -1,7 +1,8 @@
 ## Deployment topology
 
-Portal is one **all-in-one container** (api + sync worker + SvelteKit web + Postgres + Redis,
-managed internally by supervisord). It runs in either of two modes:
+Portal is one **all-in-one container**: the Portal service (one Rust binary serving the API and the
+web app, plus the sync worker), Postgres and Redis, managed internally by supervisord. It runs in
+either of two modes:
 
 **Standalone** — the container's internal Caddy is the public TLS edge and provisions a Let's
 Encrypt certificate itself. One container owns ports 80/443; nothing else to install:
@@ -11,7 +12,7 @@ Encrypt certificate itself. One container owns ports 80/443; nothing else to ins
                   │  :443  (Let's Encrypt, auto-provisioned)
       ┌───────────▼────────────────────────────────────┐
       │  farbhaus/portal  (one container)               │
-      │   internal Caddy :443 → api :8000 / web :3000   │
+      │   internal Caddy :443 → portal :8000 (API + web)│
       │   + sync worker, Postgres, Redis                │
       │   all state in the /data volume                 │
       └─────────────────────────────────────────────────┘
@@ -31,7 +32,7 @@ services without claiming 80/443):
                   │  http → 127.0.0.1:${PORTAL_PORT}   (default 18080)
       ┌───────────▼────────────────────────────────────┐
       │  farbhaus/portal  (one container)               │
-      │   internal Caddy :80 → api :8000 / web :3000    │
+      │   internal Caddy :80 → portal :8000 (API + web) │
       │   + sync worker, Postgres, Redis                │
       └─────────────────────────────────────────────────┘
 ```
@@ -212,11 +213,17 @@ docker compose up -d
 Or just `make update`. Migrations run automatically on startup; your data persists in the
 `portal_data` volume.
 
+**Coming from a Python-based image** (the first Portal releases, which ran FastAPI + a Node web
+server): the Rust image picks up the same `/data` volume — database, secrets and sessions carry
+over. It migrates a database from schema revision `b8c9d0e1f2a3` onwards; if it refuses an older
+one at startup (the log names the revision), run the last Python-based release once to bring the
+database up to date, then switch.
+
 ## Useful commands
 
 ```bash
 docker compose ps                  # status
-docker compose logs -f portal      # logs (JSON from the api; supervisord-managed services)
+docker compose logs -f portal      # logs (the Portal service + supervisord-managed services)
 docker compose down                # stop (keeps the portal_data volume / your data)
 docker compose down -v             # stop and DELETE the data volume (destructive)
 ```

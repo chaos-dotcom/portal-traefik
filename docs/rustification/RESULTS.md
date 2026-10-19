@@ -154,12 +154,15 @@ Also closed after the first pass:
   image on 2026-08-09), so behind a host proxy Caddy replaced X-Forwarded-For with the docker
   gateway: every client looked like 127.0.0.1 to the rate limiter and the download log.
 
-Open for deployment (decide with the image question):
-- `docker-compose.yml`'s healthcheck runs `python -c ...`; the Rust image has no Python, so under
-  that compose file it never turns healthy and `deploy.sh`'s `wait_healthy` aborts. `curl -fsS
-  http://127.0.0.1:8000/api/health` works in both images.
-- The Python `Dockerfile` still serves the web app with `node /app/web/build`, which the static
-  build no longer provides.
+The Rust image is now *the* image (`Dockerfile`, `docker/container/`): the compose healthcheck
+uses curl, the Python/Node image and its container files are gone, and `portal-api migrate`
+replaces the entrypoint's schema logic — it applies `schema.sql` to an empty database, upgrades
+older revisions with `apps/api-rs/migrations/` (generated from Alembic; see its README), and
+refuses a revision it has no path from. Also restored from the SSR days: `/u/{token}` and
+`/d/{token}` are served with the link's branded `<title>` (link previews) and a 404 for an unknown
+link; logout expires the session cookie (Starlette's cleared-session cookie was never ported, so
+the browser kept a valid one); `SESSION_COOKIE_NAME`, `BRANDING_LOGO_MAX_BYTES` and `LOG_LEVEL`
+are honoured.
 
 Known deviations:
 - Passkeys registered by the Python service must be re-registered (accepted); the TOTP QR SVG

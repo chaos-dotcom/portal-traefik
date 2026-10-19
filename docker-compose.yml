@@ -38,11 +38,8 @@ services:
       # if you don't use sync rules.
       - ${SYNC_HOST_ROOT:-/mnt}:${SYNC_HOST_ROOT:-/mnt}:rslave
     healthcheck:
-      test:
-        - CMD
-        - python
-        - -c
-        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health')"
+      # Straight at the API inside the container (not through Caddy), so it reports the app itself.
+      test: [ "CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:8000/api/health" ]
       interval: 15s
       timeout: 5s
       retries: 10
