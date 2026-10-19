@@ -140,12 +140,29 @@ Verified (against the Python service at `main`, sharing one database):
 - Image: first boot, restart, revision guard (older revision refused; unstamped stamped), and a
   `/data` volume created by `farbhaus/portal:latest` booting on the Rust image with its sessions
   and data intact (and back again).
-- `cargo test`: 16 unit tests (none existed before).
+- `cargo test`: 17 unit tests plus one live-DNS test (`-- --ignored`); none existed before.
+- CI (`.github/workflows/ci.yml`): `cargo clippy --all-targets -- -D warnings`, `cargo test`, and
+  `tools/rustify/schema_check.sh`. The port's 94 clippy/rustc warnings were fixed to get there.
 
-Known gaps (not in `main`'s diff; pre-existing in the port):
-- The email plausibility check resolves only A/AAAA and fails open on every error, so a
-  non-existent domain is not rejected (Python checks MX and rejects NXDOMAIN).
-- Download sessions created before the `files` snapshot column existed are not resolved live.
-- Passkeys registered by the Python service must be re-registered; the TOTP QR SVG bytes differ.
+Also closed after the first pass:
+- The email plausibility check now asks DNS for MX, then A, then AAAA (hickory-resolver), rejects a
+  domain that doesn't exist and fails open on timeouts/SERVFAIL — as Python does. It previously
+  resolved A/AAAA through getaddrinfo and failed open on everything, NXDOMAIN included.
+- Download sessions created before the `files` snapshot column existed resolve the file live
+  against the link's source, as in Python.
+- The Rust image's Caddyfile lacked `trusted_proxies static private_ranges` (added to the Python
+  image on 2026-08-09), so behind a host proxy Caddy replaced X-Forwarded-For with the docker
+  gateway: every client looked like 127.0.0.1 to the rate limiter and the download log.
+
+Open for deployment (decide with the image question):
+- `docker-compose.yml`'s healthcheck runs `python -c ...`; the Rust image has no Python, so under
+  that compose file it never turns healthy and `deploy.sh`'s `wait_healthy` aborts. `curl -fsS
+  http://127.0.0.1:8000/api/health` works in both images.
+- The Python `Dockerfile` still serves the web app with `node /app/web/build`, which the static
+  build no longer provides.
+
+Known deviations:
+- Passkeys registered by the Python service must be re-registered (accepted); the TOTP QR SVG
+  bytes differ (same payload).
 - Live Frame.io, SMTP over TLS and browser WebAuthn remain unexercised (no credentials here).
 

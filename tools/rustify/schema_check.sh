@@ -18,12 +18,18 @@ trap 'docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
 port=$(docker port "$name" 5432/tcp | head -1 | sed 's/.*://')
 until docker exec "$name" pg_isready -U portal -d portal >/dev/null 2>&1; do sleep 0.5; done
 
-(
+log=$(mktemp)
+if ! (
 	cd "$root/apps/api"
 	DATABASE_URL="postgresql+asyncpg://portal:portal@127.0.0.1:$port/portal" \
 		SESSION_SECRET=schema-check TOKEN_ENCRYPTION_KEY=schema-check \
-		uv run --quiet alembic upgrade head >/dev/null 2>&1
-)
+		uv run --quiet --frozen alembic upgrade head
+) >"$log" 2>&1; then
+	cat "$log" >&2
+	echo "alembic upgrade failed" >&2
+	exit 1
+fi
+rm -f "$log"
 head=$(docker exec "$name" psql -U portal -d portal -tAc "SELECT version_num FROM alembic_version" | tr -d '[:space:]')
 
 generated=$(mktemp)
