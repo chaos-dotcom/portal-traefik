@@ -419,7 +419,7 @@
     </label>
     <label class="block text-sm">
       <span class="text-muted">Client secret {#if frameioConfig.has_secret}<span class="text-faint">(leave blank to keep current)</span>{/if}</span>
-      <input type="password" bind:value={frameioClientSecret} autocomplete="off" placeholder={frameioConfig.has_secret ? "••••••••" : "Client secret"} class="mt-1 w-full {fieldCls}" />
+      <input type="password" bind:value={frameioClientSecret} autocomplete="off" data-bwignore data-1p-ignore data-lpignore="true" placeholder={frameioConfig.has_secret ? "••••••••" : "Client secret"} class="mt-1 w-full {fieldCls}" />
     </label>
     <label class="block text-sm">
       <span class="text-muted">Redirect URI</span>
@@ -484,7 +484,8 @@
       </label>
       <label class="block text-sm">
         <span class="text-muted">Password {#if email.has_password}<span class="text-faint">(leave blank to keep current)</span>{/if}</span>
-        <input type="password" bind:value={smtpPassword} autocomplete="off" placeholder={email.has_password ? "••••••••" : "(optional)"} class="mt-1 w-full {fieldCls}" />
+        <input type="password" bind:value={smtpPassword} autocomplete="off" data-bwignore data-1p-ignore data-lpignore="true" placeholder={email.has_password ? "••••••••" : "(optional)"} class="mt-1 w-full {fieldCls}" />
+        <span class="mt-1 block text-xs text-faint">iCloud, Gmail and other providers with two-factor sign-in need an app-specific password, not your account password.</span>
       </label>
       <label class="block text-sm sm:col-span-2">
         <span class="text-muted">Notifications to</span>

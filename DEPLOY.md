@@ -198,6 +198,25 @@ curl -s https://portal.example.com/api/health      # {"status":"ok","db":true,"r
    shown as connected. (Requires the Adobe redirect URI to match — see the **Adobe Developer Console
    setup** section in the [README](README.md#adobe-developer-console-setup-for-frameio-oauth).)
 3. While in Settings you can also set SMTP (for email notifications) and upload your brand logo.
+   Use **Send test email** to check it.
+
+### Email (SMTP)
+
+Portal sends email verification codes, upload notifications and uploaders' delivery receipts. Most
+mail providers that use two-factor sign-in **reject your account password over SMTP** and require
+an **app-specific password** instead:
+
+| Provider | Host / port | Username | Password |
+|---|---|---|---|
+| iCloud Mail | `smtp.mail.me.com` : 587, STARTTLS | your iCloud address | app-specific password (account.apple.com → Sign-In and Security → App-Specific Passwords; looks like `xxxx-xxxx-xxxx-xxxx`) |
+| Gmail / Google Workspace | `smtp.gmail.com` : 587, STARTTLS | your Google address | app password (Google Account → Security → 2-Step Verification → App passwords) |
+
+If the test email fails with *"the mail server rejected the username or password"* (SMTP `535` in
+`docker compose logs portal`), the password isn't a valid app-specific one: your account password
+was entered (or a password manager filled it in), or the app-specific password was revoked — Apple
+revokes all of them whenever the Apple ID password is changed or reset. Generate a new one and save
+it in Settings. The **From address** must be one the account may send as (your iCloud address, or a
+custom-domain address set up for it).
 
 If the connect fails, check `docker compose logs portal` (Portal never shows provider internals in
 the UI). The most common cause is a redirect-URI mismatch.

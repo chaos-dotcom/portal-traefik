@@ -82,6 +82,10 @@ fn format_duration(seconds: f64) -> String {
     format!("{hours}h {minutes}m")
 }
 
+/// The test-email error for a rejected SMTP login (535).
+pub const AUTH_REJECTED: &str = "the mail server rejected the username or password. iCloud, Gmail and other \
+     providers with two-factor sign-in need an app-specific password here, not your account password";
+
 /// Every caller sends to exactly one person; never let an address list fan a message out.
 fn single_recipient(to: &str) -> bool {
     to.parse::<lettre::message::Mailboxes>().map(|m| m.into_iter().count()).unwrap_or(1) == 1
@@ -119,6 +123,12 @@ pub async fn send_email(config: &EmailConfig, to: &str, subject: &str, text: &st
     }
     if let Err(e) = transport.build().send(email).await {
         tracing::warn!("notify.email.send_failed to={to} error={e}");
+        // 535: the server refused the login. With iCloud, Gmail and other providers that use
+        // two-factor sign-in that is almost always the account password where an app-specific
+        // password is required — say so, rather than a bare "could not send".
+        if e.status().is_some_and(|code| code.to_string() == "535") {
+            return Err(EmailError(AUTH_REJECTED.into()));
+        }
         return Err(EmailError("Could not send email".into()));
     }
     tracing::info!("notify.email.sent to={to} subject={subject}");
