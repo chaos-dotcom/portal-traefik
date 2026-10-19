@@ -618,3 +618,12 @@ ALTER TABLE ONLY public.webauthn_credentials
 
 \unrestrict tfbENkYsaCXcqiOD94YqXLoWlNWqg8vP3gLXERIJj6Hihj7SNxiEVvfqqtIgmAz
 
+
+--
+-- Alembic revision this schema corresponds to. A database created from this file is stamped with
+-- it, so the Python service (and Alembic) see a normal, up-to-date database; the Rust entrypoint
+-- refuses any database at another revision (see docker/container/rust/portal-entrypoint.sh).
+-- Keep it in step with the head of apps/api/alembic/versions — tools/rustify/schema_check.sh
+-- regenerates this file from Alembic and fails if they drift.
+--
+INSERT INTO public.alembic_version (version_num) VALUES ('c9d0e1f2a3b4');

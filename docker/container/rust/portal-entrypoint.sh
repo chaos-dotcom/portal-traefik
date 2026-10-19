@@ -60,11 +60,12 @@ for name in SESSION_SECRET TOKEN_ENCRYPTION_KEY; do
 	chmod 600 "$file"
 done
 
-# --- Postgres init + migrations + seed --------------------------------------------------------
+# --- Postgres init + schema + seed ------------------------------------------------------------
 # Local + 127.0.0.1 connections use trust auth: the cluster is reachable only from inside this
 # container (Postgres binds loopback and the container publishes only :80), so no password is
-# needed. We run schema migrations and the admin seed HERE, against a temporary Postgres, before
-# starting supervisord — so the supervised api and worker never race an unmigrated schema.
+# needed. We apply the schema (first boot), check its revision and run the admin seed HERE,
+# against a temporary Postgres, before starting supervisord — so the supervised api and worker
+# never race an unmigrated schema.
 if [ ! -s "$PGDATA/PG_VERSION" ]; then
 	echo "[entrypoint] initializing PostgreSQL data directory"
 	su -s /bin/sh postgres -c "initdb -D '$PGDATA' -U postgres --auth-local=trust --auth-host=trust --encoding=UTF8"
@@ -79,9 +80,27 @@ if ! su -s /bin/sh postgres -c "psql -h 127.0.0.1 -U postgres -d postgres -tAc \
 fi
 
 echo "[entrypoint] applying schema (first boot only) + seeding admin"
-if ! su -s /bin/sh postgres -c "psql -h 127.0.0.1 -U portal -d portal -tAc \"SELECT to_regclass('public.users')\"" | grep -q users; then
+psql_portal() { su -s /bin/sh postgres -c "psql -h 127.0.0.1 -U portal -d portal -v ON_ERROR_STOP=1 $*"; }
+if ! psql_portal "-tAc \"SELECT to_regclass('public.users')\"" | grep -q users; then
 	# Apply as the portal role so it owns the objects (as Alembic would have).
-	su -s /bin/sh postgres -c "psql -h 127.0.0.1 -U portal -d portal -v ON_ERROR_STOP=1 -q -f /app/schema.sql"
+	psql_portal "-q -f /app/schema.sql"
+fi
+
+# The Rust service has no migration runner: it ships one schema snapshot (schema.sql), stamped
+# with the Alembic revision it matches. Refuse a database at any other revision rather than run
+# against columns it doesn't expect — e.g. data from an older Python image (upgrade it with that
+# image first, which migrates to head) or from a newer one (use a Rust image built from it).
+expected_rev=$(sed -n "s/^INSERT INTO public.alembic_version (version_num) VALUES ('\([0-9a-f]*\)');$/\1/p" /app/schema.sql)
+current_rev=$(psql_portal "-tAc \"SELECT version_num FROM alembic_version\"" | tr -d '[:space:]')
+if [ -z "$current_rev" ]; then
+	# Created by an earlier Rust image, before schema.sql carried its revision: same snapshot.
+	echo "[entrypoint] stamping schema revision $expected_rev"
+	psql_portal "-q -c \"INSERT INTO alembic_version (version_num) VALUES ('$expected_rev')\""
+elif [ "$current_rev" != "$expected_rev" ]; then
+	echo "[entrypoint] FATAL: the database is at schema revision $current_rev, but this image expects $expected_rev." >&2
+	echo "[entrypoint] Migrate it with the matching Python image (farbhaus/portal) first, then start this one." >&2
+	su -s /bin/sh postgres -c "pg_ctl -D '$PGDATA' -w stop"
+	exit 1
 fi
 ( cd /app && portal-api seed )
 
