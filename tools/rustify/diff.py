@@ -13,8 +13,8 @@ from matrix import VOLATILE_HEADERS
 
 
 def diff(a_path: str, b_path: str) -> bool:
-    a = json.load(open(a_path))
-    b = json.load(open(b_path))
+    with open(a_path) as fa, open(b_path) as fb:
+        a, b = json.load(fa), json.load(fb)
     if len(a) != len(b):
         print(f"FAIL: matrix length {len(a)} != {len(b)}")
         return False

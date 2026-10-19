@@ -24,7 +24,7 @@ async def worker(client, paths, deadline, stats, idx):
         try:
             r = await client.get(path)
             ok = r.status_code < 500
-        except Exception:
+        except httpx.HTTPError:
             ok = False
         dt = time.perf_counter() - t0
         stats.append((dt, ok))
@@ -35,12 +35,13 @@ async def run(base_url, seconds, concurrency, paths):
     stats = []
     limits = httpx.Limits(max_connections=concurrency + 4, max_keepalive_connections=concurrency)
     async with httpx.AsyncClient(base_url=base_url, timeout=30.0, limits=limits) as client:
-        # warmup
+        # Warmup: open the pooled connections. A failed request here is fine — the measured run
+        # below counts errors on its own.
         for p in paths:
             try:
                 await client.get(p)
-            except Exception:
-                pass
+            except httpx.HTTPError:
+                continue
         t0 = time.perf_counter()
         await asyncio.gather(*(worker(client, paths, deadline, stats, i) for i in range(concurrency)))
         wall = time.perf_counter() - t0
