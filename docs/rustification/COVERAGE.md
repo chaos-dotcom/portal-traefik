@@ -115,9 +115,11 @@ The `portal-api worker` subprocess replaces the arq worker.
 
 Exercised against the Python service: the unauthenticated matrix (10/10), the
 authenticated read suite, session-cookie interop, webhook signing, the picker 409s,
-and every route above that is reachable without live Frame.io/SMTP. Live Frame.io
-downloads/uploads, SMTP delivery and browser WebAuthn need real credentials or a
-browser, so those paths are ported but not end-to-end exercised here.
+and every route above that is reachable without live Frame.io/SMTP. The sync worker,
+download links and upload completion (incl. SMTP delivery to a local sink) were run
+end to end against a mock Frame.io — see RESULTS.md §6. Live Frame.io, SMTP over TLS
+and browser WebAuthn need real credentials or a browser, so those paths are ported
+but not end-to-end exercised here.
 
 Known deviations: passkeys registered by the Python service must be re-registered
 (webauthn-rs stores its own serialized passkey in `public_key`); the QR SVG bytes

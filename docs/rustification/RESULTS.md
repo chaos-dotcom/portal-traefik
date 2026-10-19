@@ -88,5 +88,64 @@ Authenticated: `GET /api/auth/me`, `/api/upload-links`, `/api/upload-links/exten
 `/api/settings/security`, `/api/settings/email`, `/api/settings/frameio-config`, `/api/sync-rules`,
 `/api/activity`, `/api/activity/actions`, `/api/activity/summary`.
 
-Not ported: all write endpoints, upload/download session engines, sync engine + worker, Frame.io
-client + OAuth, TOTP/passkey mutations, email/verify, GDPR export/erase.
+That list is the byte-diffed read surface. Every route is ported (COVERAGE.md); the write paths
+and engines were checked by behaviour rather than byte diff — see §6.
+
+## 6. Parity with `main` (a6adf7e)
+
+The port was branched at ff0e1f9; `main` then gained the changes below. Each is ported, alongside
+fixes for places where the port had diverged from the Python service it copies.
+
+Ported from `main`:
+- Sync stays inside a rule's folder (#65): `folder_relative_path` returns `None` when the walk
+  never reaches the rule's folder, folder metadata expires after 600s, scope is checked before the
+  readiness wait, and a file skipped as outside is re-run by reconcile once it shows up in the
+  rule's listing.
+- Waiting jobs wake on arrival (#85): webhooks and upload triggers wake a job parked in `waiting`;
+  the worker claims jobs atomically and follow-ups carry the job's `updated_at` (`as_of`), so a
+  superseded re-check is dropped. Reconcile also heals stranded `waiting` jobs, with stale
+  thresholds derived from the retry backoff and poll cadence.
+- Retrying a running job is a 409; the dashboard reports `queued` (pending) jobs.
+- Uploads (#69, #86): `total_bytes` is recorded when the session starts; completion sets
+  `uploaded_bytes`, mails only on the first completion, sends the uploader a delivery receipt
+  (verified addresses only) and returns `receipt_to`. Trust is slid on uploads and downloads only
+  for an address this browser verified.
+- Email: one recipient per message, and `main`'s stricter address syntax (no lists, display names
+  or quoted parts; 254-char cap). Rust's regex engine is linear, so the ReDoS fix holds by design.
+- Healthy `/api/health` probes are not request-logged.
+
+Port divergences fixed along the way:
+- `POST /api/auth/login/totp` read `{email, password}`; the web app sends `{code}`, so 2FA admins
+  could not log in.
+- Rate limits matched Python's on only 5 of its 12 limited routes (none on admin login).
+- Placeholder secrets were silently accepted (a forgeable session cookie); now refused at start,
+  like `require_secure_secrets` (`ALLOW_INSECURE_DEFAULTS=true` for local runs).
+- Email verification codes came from a non-cryptographic RNG; now the OS CSPRNG, with a
+  constant-time compare and an atomic attempt counter.
+- No `x-request-id` / request log; plain-SMTP relays (STARTTLS off) unsupported; SMTP errors
+  surfaced raw; pydantic-style booleans (`yes`/`on`) ignored; the legacy `.env` SMTP/Frame.io
+  import (`bootstrap_config`) missing from `portal-api seed`; download selections fetched with
+  unbounded concurrency; sync downloads used a 300s total (not per-read) timeout and no job
+  timeout; job errors stored as Rust `Debug` text.
+- The harness excluded `x-request-id` from comparison; it now pins and compares it.
+
+Verified (against the Python service at `main`, sharing one database):
+- `capture.py`/`diff.py` 10/10 byte-identical, `authdiff.py` 22/22, cookie interop both ways.
+- Security checks: 2FA login, 429 at the same request counts on every limited route, refusal of
+  placeholder secrets.
+- Upload completion on both services (verified/unverified/replayed) gives identical responses;
+  the receipt Rust sends is byte-identical (text and HTML) to Python's `render_upload_receipt`.
+- Sync worker against a mock Frame.io (13 scenarios: scope, nesting, wake-up within 4s of
+  arrival vs a 20s poll, one download per file, 409 on retry, reconcile healing).
+- Image: first boot, restart, revision guard (older revision refused; unstamped stamped), and a
+  `/data` volume created by `farbhaus/portal:latest` booting on the Rust image with its sessions
+  and data intact (and back again).
+- `cargo test`: 16 unit tests (none existed before).
+
+Known gaps (not in `main`'s diff; pre-existing in the port):
+- The email plausibility check resolves only A/AAAA and fails open on every error, so a
+  non-existent domain is not rejected (Python checks MX and rejects NXDOMAIN).
+- Download sessions created before the `files` snapshot column existed are not resolved live.
+- Passkeys registered by the Python service must be re-registered; the TOTP QR SVG bytes differ.
+- Live Frame.io, SMTP over TLS and browser WebAuthn remain unexercised (no credentials here).
+

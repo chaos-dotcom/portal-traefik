@@ -18,7 +18,7 @@ _CLOCK = re.compile(rb'"(generated_at|expires_at|created_at|updated_at|started_a
 def _normalize(content: bytes) -> bytes:
     return _CLOCK.sub(rb'"\1":"<clock>"', content)
 
-from matrix import VOLATILE_HEADERS
+from matrix import PINNED_REQUEST_ID, VOLATILE_HEADERS
 
 DEFAULT_PATHS = [
     "/api/auth/me",
@@ -55,7 +55,9 @@ def login(base, email, pw):
 
 def get(base, cookie, path):
     with httpx.Client(base_url=base, timeout=30.0) as c:
-        return c.get(path, headers={"Cookie": f"portal_session={cookie}"})
+        return c.get(
+            path, headers={"Cookie": f"portal_session={cookie}", "X-Request-Id": PINNED_REQUEST_ID}
+        )
 
 
 def main():

@@ -11,7 +11,7 @@ import sys
 
 import httpx
 
-from matrix import MATRIX, VOLATILE_HEADERS
+from matrix import MATRIX, PINNED_REQUEST_ID, VOLATILE_HEADERS
 
 
 def capture(base_url: str, out_path: str) -> None:
@@ -20,7 +20,7 @@ def capture(base_url: str, out_path: str) -> None:
         for method, path, kw in MATRIX:
             headers = dict(kw.get("headers") or {})
             # Pin the request id so generated ids don't pollute the diff.
-            headers.setdefault("X-Request-Id", "00000000000000000000000000000000")
+            headers.setdefault("X-Request-Id", PINNED_REQUEST_ID)
             body = kw.get("json")
             r = client.request(method, path, headers=headers, json=body)
             out.append(

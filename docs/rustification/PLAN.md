@@ -36,7 +36,7 @@ Everything else must match byte for byte.
 |---|---|
 | HTTP API (`routes/`) | port to Rust |
 | Auth (password, TOTP, WebAuthn, session cookies, lockout, rate limit) | port |
-| DB models + Alembic schema | **keep the schema**; Rust uses the same migrations |
+| DB models + Alembic schema | **keep the schema**; Alembic stays its owner, Rust ships a stamped snapshot (`apps/api-rs/schema.sql`) |
 | Upload/download link engines | port |
 | Sync engine + worker (arq → Rust queue worker) | port |
 | Frame.io client / OAuth | port |
@@ -88,9 +88,12 @@ reproducible.
 
 - Working on branch `rust-port`; `main` is untouched.
 - Behind-proxy binding only (`127.0.0.1:18080`); nothing binds 80/443 on this host.
-- The Postgres schema is owned by the existing Alembic migrations; Rust does not fork it.
-- Frame.io live calls are stubbed at the `FrameioClient` seam for the equivalence matrix (no real
-  Adobe credentials available); the client's request-shaping is unit-tested against recorded
-  fixtures instead. Values are reported, not hidden.
+- The Postgres schema is owned by the existing Alembic migrations; Rust does not fork it. The Rust
+  image applies `apps/api-rs/schema.sql` (an Alembic-head dump stamped with its revision) on first
+  boot and refuses a database at any other revision; `tools/rustify/schema_check.sh` fails when the
+  snapshot drifts from Alembic, and `--write` regenerates it after a new migration.
+- No real Adobe credentials are available, so live Frame.io calls are not exercised. The sync
+  worker and the download engine were run end to end against a local mock of the V4 endpoints
+  instead (see RESULTS.md §6). Values are reported, not hidden.
 - Load generator: a purpose-built async client in `tools/rustify/load.py` (no external dep), to
   keep before/after identical.

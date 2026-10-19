@@ -19,5 +19,7 @@ MATRIX = [
 ]
 
 # Headers that the transport/host injects and which therefore are not part of the app's
-# contract. Everything else must match byte for byte.
-VOLATILE_HEADERS = {"date", "server", "content-length", "x-request-id", "set-cookie"}
+# contract. Everything else must match byte for byte — including x-request-id, which both services
+# echo back, so every request pins it (PINNED_REQUEST_ID) rather than letting each mint its own.
+VOLATILE_HEADERS = {"date", "server", "content-length", "set-cookie"}
+PINNED_REQUEST_ID = "00000000000000000000000000000000"
