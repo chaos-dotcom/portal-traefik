@@ -9,7 +9,7 @@ use crate::config::Settings;
 use crate::frameio::FrameioError;
 use crate::storage::frameio_backend::FrameioStorageBackend;
 use crate::storage::{DestinationConfig, RemoteFile};
-use crate::sync::destination::{arm_destination, check_destination, DestinationUnavailable};
+use crate::sync::destination::{arm_destination, check_destination};
 use crate::sync::download::download_to_file;
 use crate::sync::paths::{resolve_conflict, resolve_destination, PathContext};
 
@@ -53,7 +53,6 @@ pub struct SyncJobRow {
     pub retry_count: i32,
     pub started_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
-    pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub source_wait_started_at: Option<DateTime<Utc>>,
 }
@@ -65,14 +64,13 @@ pub struct SyncRuleRow {
     pub path_template: Option<String>,
     pub source_config: serde_json::Value,
     pub frameio_webhook_id: Option<String>,
-    pub webhook_secret: Option<String>,
     pub enabled: bool,
 }
 
 pub async fn load_rule(db: &PgPool, id: Uuid) -> sqlx::Result<Option<SyncRuleRow>> {
     let row = sqlx::query(
         "SELECT id, destination_path, conflict_policy, path_template, source_config,
-                frameio_webhook_id, webhook_secret, enabled FROM sync_rules WHERE id = $1",
+                frameio_webhook_id, enabled FROM sync_rules WHERE id = $1",
     )
     .bind(id)
     .fetch_optional(db)
@@ -84,7 +82,6 @@ pub async fn load_rule(db: &PgPool, id: Uuid) -> sqlx::Result<Option<SyncRuleRow
         path_template: r.get("path_template"),
         source_config: r.get("source_config"),
         frameio_webhook_id: r.get("frameio_webhook_id"),
-        webhook_secret: r.get("webhook_secret"),
         enabled: r.get("enabled"),
     }))
 }
@@ -92,7 +89,7 @@ pub async fn load_rule(db: &PgPool, id: Uuid) -> sqlx::Result<Option<SyncRuleRow
 pub async fn load_job(db: &PgPool, id: Uuid) -> sqlx::Result<Option<SyncJobRow>> {
     let row = sqlx::query(
         "SELECT id, sync_rule_id, frameio_file_id, status, bytes, sha256, error, retry_count,
-                started_at, completed_at, created_at, updated_at, source_wait_started_at
+                started_at, completed_at, updated_at, source_wait_started_at
            FROM sync_jobs WHERE id = $1",
     )
     .bind(id)
@@ -109,7 +106,6 @@ pub async fn load_job(db: &PgPool, id: Uuid) -> sqlx::Result<Option<SyncJobRow>>
         retry_count: r.get("retry_count"),
         started_at: r.get("started_at"),
         completed_at: r.get("completed_at"),
-        created_at: r.get("created_at"),
         updated_at: r.get("updated_at"),
         source_wait_started_at: r.get("source_wait_started_at"),
     }))
@@ -243,11 +239,10 @@ pub async fn execute_job(
 
     // Wait for the original to be downloadable. Frame.io reports a status; if it's not yet a
     // downloadable one, defer (the worker re-queues patiently without burning the retry budget).
-    if let Some(status) = &remote.status {
-        if !DOWNLOADABLE_STATUSES.contains(&status.as_str()) {
+    if let Some(status) = &remote.status
+        && !DOWNLOADABLE_STATUSES.contains(&status.as_str()) {
             return Err(JobError::SourceNotReady(format!("file status is '{status}', not yet downloadable")));
         }
-    }
 
     let ctx = PathContext {
         filename: remote.name.clone(),
@@ -376,7 +371,6 @@ pub async fn reconcile_rule(
                     retry_count: 0,
                     started_at: row.get("started_at"),
                     completed_at: None,
-                    created_at: now,
                     updated_at: row.get("updated_at"),
                     source_wait_started_at: None,
                 };
@@ -425,7 +419,6 @@ mod tests {
             retry_count: 0,
             started_at: Some(now),
             completed_at: None,
-            created_at: now,
             updated_at: now - Duration::seconds(updated_ago_s),
             source_wait_started_at: None,
         }

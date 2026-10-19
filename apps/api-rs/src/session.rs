@@ -193,11 +193,10 @@ pub fn python_json(map: &Map<String, Value>) -> String {
 fn parse_cookie(cookie_header: &str, name: &str) -> Option<String> {
     for part in cookie_header.split(';') {
         let part = part.trim();
-        if let Some((k, v)) = part.split_once('=') {
-            if k == name {
+        if let Some((k, v)) = part.split_once('=')
+            && k == name {
                 return Some(v.to_string());
             }
-        }
     }
     None
 }
@@ -218,16 +217,13 @@ pub async fn session_middleware(
         .and_then(|h| parse_cookie(h, SESSION_COOKIE));
 
     let mut session = SessionState::default();
-    if let Some(cookie) = decoded {
-        if let Some(payload) = unsign(secret.as_bytes(), &cookie, Some(MAX_AGE)) {
-            if let Ok(v) = STANDARD.decode(payload) {
-                if let Ok(Value::Object(map)) = serde_json::from_slice::<Value>(&v) {
+    if let Some(cookie) = decoded
+        && let Some(payload) = unsign(secret.as_bytes(), &cookie, Some(MAX_AGE))
+            && let Ok(v) = STANDARD.decode(payload)
+                && let Ok(Value::Object(map)) = serde_json::from_slice::<Value>(&v) {
                     session.data = map;
                     session.initial_empty = false;
                 }
-            }
-        }
-    }
     let handle: SessionHandle = Arc::new(Mutex::new(session));
     req.extensions_mut().insert(handle.clone());
 

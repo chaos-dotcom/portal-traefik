@@ -109,7 +109,7 @@ async fn login_rate_limit(
     peer: std::net::SocketAddr,
 ) -> Result<(), Response> {
     let mut redis = state.redis.clone();
-    crate::lib::ratelimit::check(&mut redis, &state.settings, "strict", "-", headers, Some(peer))
+    crate::common::ratelimit::check(&mut redis, &state.settings, "strict", "-", headers, Some(peer))
         .await
         .map_err(|msg| detail(StatusCode::TOO_MANY_REQUESTS, &msg))
 }

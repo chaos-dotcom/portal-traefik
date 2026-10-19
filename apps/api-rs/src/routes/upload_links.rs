@@ -26,11 +26,10 @@ fn link_state(revoked_at: Option<DateTime<Utc>>, expires_at: Option<DateTime<Utc
     if revoked_at.is_some() {
         return "revoked";
     }
-    if let Some(exp) = expires_at {
-        if exp <= Utc::now() {
+    if let Some(exp) = expires_at
+        && exp <= Utc::now() {
             return "expired";
         }
-    }
     "ok"
 }
 
@@ -145,7 +144,7 @@ pub async fn create_link(State(state): State<AppState>, admin: Admin, Json(body)
     }
     let password = body.get("password").and_then(|v| v.as_str()).filter(|p| !p.is_empty());
     let password_hash = match password {
-        Some(p) => match bcrypt::hash(p, bcrypt::DEFAULT_COST) { Ok(h) => Some(h), Err(_) => None },
+        Some(p) => bcrypt::hash(p, bcrypt::DEFAULT_COST).ok(),
         None => None,
     };
     let verify_email = body.get("verify_email").and_then(|v| v.as_bool()).unwrap_or(false);

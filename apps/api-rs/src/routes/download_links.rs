@@ -15,11 +15,10 @@ fn link_state(revoked_at: Option<DateTime<Utc>>, expires_at: Option<DateTime<Utc
     if revoked_at.is_some() {
         return "revoked";
     }
-    if let Some(exp) = expires_at {
-        if exp <= Utc::now() {
+    if let Some(exp) = expires_at
+        && exp <= Utc::now() {
             return "expired";
         }
-    }
     "ok"
 }
 
@@ -169,8 +168,8 @@ pub async fn create_link(State(state): State<AppState>, admin: Admin, Json(body)
 
 pub async fn update_link(State(state): State<AppState>, admin: Admin, axum::extract::Path(id): axum::extract::Path<uuid::Uuid>, Json(body): Json<serde_json::Map<String, Value>>) -> Response {
     let Some(existing) = fetch_out(&state, id).await else { return not_found() };
-    if let Some(new_source) = body.get("source") {
-        if Some(new_source) != existing.get("source") {
+    if let Some(new_source) = body.get("source")
+        && Some(new_source) != existing.get("source") {
             if let Err(msg) = validate_source(new_source) {
                 return crate::error::detail(axum::http::StatusCode::BAD_REQUEST, &msg);
             }
@@ -181,7 +180,6 @@ pub async fn update_link(State(state): State<AppState>, admin: Admin, axum::extr
                 .bind(json!({ "download_link_id": id.to_string(), "from_type": from_type, "to_type": new_source.get("type") }))
                 .execute(&state.db).await;
         }
-    }
     if body.contains_key("password") {
         let pw = body.get("password").and_then(|v| v.as_str()).filter(|p| !p.is_empty());
         let hash = pw.and_then(|p| bcrypt::hash(p, bcrypt::DEFAULT_COST).ok());
@@ -370,13 +368,11 @@ pub async fn source_info(State(state): State<AppState>, _: Admin, axum::extract:
                         None => None,
                     };
                     let mut path: Vec<Value> = ancestry.iter().map(|i| json!({ "id": i.id, "name": i.name })).collect();
-                    if let Some(p) = &project {
-                        if let Some(root) = &p.root_folder_id {
-                            if path.first().and_then(|s| s.get("id")).and_then(|v| v.as_str()) == Some(root.as_str()) {
+                    if let Some(p) = &project
+                        && let Some(root) = &p.root_folder_id
+                            && path.first().and_then(|s| s.get("id")).and_then(|v| v.as_str()) == Some(root.as_str()) {
                                 path[0] = json!({ "id": root, "name": format!("{} (root)", p.name) });
                             }
-                        }
-                    }
                     let names: Vec<String> = path.iter().filter_map(|p| p.get("name").and_then(|v| v.as_str()).map(|s| s.to_string())).collect();
                     let names = if names.is_empty() { vec![folder_id.clone()] } else { names };
                     let full = names.join("/");

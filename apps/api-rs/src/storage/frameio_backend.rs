@@ -9,7 +9,7 @@ use serde_json::json;
 use crate::frameio::{FrameioClient, FrameioError};
 use crate::storage::{
     ChangeSubscription, DestinationConfig, DownloadURL, RemoteFile, UploadChunk,
-    UploadCredentials, UploadNotReady, UploadSession,
+    UploadCredentials, UploadSession,
 };
 
 const SYNC_TRIGGER_EVENTS: [&str; 2] = ["file.ready", "file.upload.completed"];
@@ -168,7 +168,7 @@ impl FrameioStorageBackend {
             return Err(FrameioError::Other(format!("Upload failed for file {file_id}")));
         }
         if !complete {
-            // Surfaced as UploadNotReady by callers.
+            // Callers detect this marker with `is_not_ready` and report "not ready yet".
             return Err(FrameioError::Other(format!("__not_ready__{file_id}")));
         }
         Ok(RemoteFile {
@@ -208,15 +208,10 @@ impl FrameioStorageBackend {
 
 /// Marker error used to translate `complete_upload`'s not-ready case.
 pub fn is_not_ready(e: &FrameioError) -> Option<String> {
-    if let FrameioError::Other(msg) = e {
-        if let Some(id) = msg.strip_prefix("__not_ready__") {
+    if let FrameioError::Other(msg) = e
+        && let Some(id) = msg.strip_prefix("__not_ready__") {
             return Some(id.to_string());
         }
-    }
     None
 }
 
-/// Re-export so callers can construct the marker without knowing the string.
-pub fn upload_not_ready(id: &str) -> UploadNotReady {
-    UploadNotReady(id.to_string())
-}

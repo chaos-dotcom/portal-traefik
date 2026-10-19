@@ -15,6 +15,7 @@ chrono = { version = "0.4.45", features = ["serde"] }
 futures = "0.3.34"
 getrandom = "0.4.3"
 hex = "0.4.3"
+hickory-resolver = "0.26.3"
 hmac = "0.13.0"
 lettre = { version = "0.11.23", default-features = false, features = ["smtp-transport", "tokio1-rustls", "builder", "hostname", "ring", "webpki-roots"] }
 qrcode = { version = "0.14.1", features = ["svg"] }

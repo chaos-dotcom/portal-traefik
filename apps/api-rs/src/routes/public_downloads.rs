@@ -13,7 +13,7 @@ use sqlx::Row;
 use uuid::Uuid;
 
 use crate::downloads::{branding, resolve_source};
-use crate::lib::{lockout, net, ratelimit};
+use crate::common::{lockout, net, ratelimit};
 use crate::state::AppState;
 use crate::storage::frameio_backend::FrameioStorageBackend;
 use crate::storage::DestinationConfig;
@@ -32,11 +32,10 @@ fn link_state_of(revoked_at: Option<DateTime<Utc>>, expires_at: Option<DateTime<
     if revoked_at.is_some() {
         return "revoked";
     }
-    if let Some(exp) = expires_at {
-        if exp <= Utc::now() {
+    if let Some(exp) = expires_at
+        && exp <= Utc::now() {
             return "expired";
         }
-    }
     "ok"
 }
 
@@ -68,7 +67,7 @@ pub async fn resolve_link(
     );
     let app = sqlx::query("SELECT logo_png, logo_updated_at, brand_display_name, brand_accent_color FROM app_settings LIMIT 1")
         .fetch_optional(&state.db).await.ok().flatten();
-    let (app_logo, app_name, app_accent) = match app {
+    let (app_logo, _app_name, app_accent) = match app {
         Some(r) => {
             let has_logo = r.get::<Option<Vec<u8>>, _>("logo_png").is_some();
             let updated: Option<DateTime<Utc>> = r.get("logo_updated_at");
@@ -226,13 +225,11 @@ pub async fn start_session(
         "path": f.path,
     })).collect();
     let mut res = Json(json!({ "session_id": session_id.to_string(), "files": files })).into_response();
-    if row.get::<bool, _>("verify_email") {
-        if let Some(email_str) = email {
-            if let Ok(v) = axum::http::HeaderValue::from_str(&verify::trust_cookie(&state.settings, email_str)) {
+    if row.get::<bool, _>("verify_email")
+        && let Some(email_str) = email
+            && let Ok(v) = axum::http::HeaderValue::from_str(&verify::trust_cookie(&state.settings, email_str)) {
                 res.headers_mut().append(axum::http::header::SET_COOKIE, v);
             }
-        }
-    }
     res
 }
 
@@ -261,24 +258,37 @@ pub async fn file_download_url(
 
     let max_downloads: Option<i32> = row.get("max_downloads");
     let downloads_count: i32 = row.get("downloads_count");
-    if let Some(max) = max_downloads {
-        if downloads_count >= max {
+    if let Some(max) = max_downloads
+        && downloads_count >= max {
             return crate::error::detail(StatusCode::TOO_MANY_REQUESTS, "This link's download limit has been reached");
         }
-    }
 
-    // The recipient may only fetch a file from their session's resolved listing.
-    let files: Option<Value> = session.get("files");
-    let matched = files
+    // The recipient may only fetch a file that was in their session's resolved listing; that
+    // snapshot also carries the name/size for the download event. Sessions created before the
+    // snapshot column existed fall back to a live resolve.
+    let source: Value = row.get("source");
+    let files: Option<Value> = session.get::<Option<Value>, _>("files").filter(|v| !v.is_null());
+    let mut matched = files
         .as_ref()
         .and_then(|v| v.as_array())
         .and_then(|arr| arr.iter().find(|f| f.get("id").and_then(|i| i.as_str()) == Some(file_id.as_str())))
         .cloned();
+    if matched.is_none() && files.is_none() {
+        match crate::downloads::resolve_file(&state.frameio, &source, &file_id).await {
+            Ok(found) => matched = found.map(|f| json!({ "id": f.id, "name": f.name, "size": f.file_size })),
+            Err(crate::frameio::FrameioError::NotConnected) => {
+                return crate::error::detail(StatusCode::SERVICE_UNAVAILABLE, "Downloads are temporarily unavailable")
+            }
+            Err(e) => {
+                tracing::warn!("public.download.resolve_failed: {e:?}");
+                return crate::error::detail(StatusCode::BAD_GATEWAY, "Could not generate the download");
+            }
+        }
+    }
     let Some(matched) = matched else {
         return crate::error::detail(StatusCode::NOT_FOUND, "File not found in this link");
     };
 
-    let source: Value = row.get("source");
     let account_id = source.get("account_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let dest = DestinationConfig::new("frameio", json!({ "account_id": account_id }));
     let backend = FrameioStorageBackend::new(state.frameio.clone());
@@ -321,11 +331,10 @@ pub async fn file_download_url(
     let viewer_email: Option<String> = session.get("viewer_email");
     if let Some(email) = viewer_email.filter(|e| !e.is_empty()) {
         let cookies = headers.get("cookie").and_then(|v| v.to_str().ok()).unwrap_or("");
-        if row.get::<bool, _>("verify_email") && verify::is_trusted(&state.settings, cookies, &email) {
-            if let Ok(v) = axum::http::HeaderValue::from_str(&verify::trust_cookie(&state.settings, &email)) {
+        if row.get::<bool, _>("verify_email") && verify::is_trusted(&state.settings, cookies, &email)
+            && let Ok(v) = axum::http::HeaderValue::from_str(&verify::trust_cookie(&state.settings, &email)) {
                 res.headers_mut().append(axum::http::header::SET_COOKIE, v);
             }
-        }
     }
     res
 }

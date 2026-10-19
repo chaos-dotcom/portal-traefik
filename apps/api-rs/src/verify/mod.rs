@@ -53,26 +53,87 @@ pub fn valid_syntax(email: &str) -> bool {
     email.chars().count() <= MAX_EMAIL_LENGTH && email_re().is_match(email)
 }
 
-/// Syntax + (optionally) a DNS A/AAAA plausibility check; DNS errors fail open.
+/// What one DNS lookup said about a domain, as `_domain_receives_mail` reads it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum DnsAnswer {
+    /// At least one record of the asked type.
+    Records,
+    /// The domain exists but has no record of this type (dnspython's NoAnswer).
+    NoRecords,
+    /// The domain doesn't exist at all (NXDOMAIN).
+    NoSuchDomain,
+    /// Timeout, SERVFAIL, no resolver, ... — unknown.
+    Failed,
+}
+
+/// MX is the definitive signal; fall back to A/AAAA (a domain can receive mail on its A record).
+/// A domain that doesn't exist fails; a transient/resolver error fails open — the code send is
+/// the real gate. Port of `portal.verify.email_check._domain_receives_mail`.
+fn receives_mail(answers: impl IntoIterator<Item = DnsAnswer>) -> bool {
+    for answer in answers {
+        match answer {
+            DnsAnswer::Records | DnsAnswer::Failed => return true,
+            DnsAnswer::NoSuchDomain => return false,
+            DnsAnswer::NoRecords => continue,
+        }
+    }
+    false
+}
+
+const DNS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+fn resolver() -> Option<&'static hickory_resolver::TokioResolver> {
+    static RESOLVER: std::sync::OnceLock<Option<hickory_resolver::TokioResolver>> = std::sync::OnceLock::new();
+    RESOLVER
+        .get_or_init(|| {
+            let mut builder = hickory_resolver::TokioResolver::builder_tokio()
+                .map_err(|e| tracing::warn!("verify.dns.no_resolver error={e}"))
+                .ok()?;
+            let opts = builder.options_mut();
+            opts.timeout = DNS_TIMEOUT;
+            opts.attempts = 1;
+            // dnspython asks the nameservers only; /etc/hosts is not a mail signal.
+            opts.use_hosts_file = hickory_resolver::config::ResolveHosts::Never;
+            builder.build().map_err(|e| tracing::warn!("verify.dns.no_resolver error={e}")).ok()
+        })
+        .as_ref()
+}
+
+async fn domain_receives_mail(domain: &str) -> bool {
+    let Some(resolver) = resolver() else { return true }; // no resolver: fail open
+    // Absolute name, so the resolver's search list is never appended (dnspython's default).
+    let name = format!("{}.", domain.trim_end_matches('.'));
+    let classify = |r: Result<hickory_resolver::lookup::Lookup, hickory_resolver::net::NetError>| match r {
+        Ok(lookup) if !lookup.answers().is_empty() => DnsAnswer::Records,
+        Ok(_) => DnsAnswer::NoRecords,
+        Err(e) if e.is_nx_domain() => DnsAnswer::NoSuchDomain,
+        Err(e) if e.is_no_records_found() => DnsAnswer::NoRecords,
+        Err(_) => DnsAnswer::Failed,
+    };
+    for record in ["MX", "A", "AAAA"] {
+        let answer = match record {
+            "MX" => classify(resolver.mx_lookup(name.as_str()).await),
+            "A" => classify(resolver.ipv4_lookup(name.as_str()).await),
+            _ => classify(resolver.ipv6_lookup(name.as_str()).await),
+        };
+        if answer != DnsAnswer::NoRecords {
+            return receives_mail([answer]);
+        }
+    }
+    false
+}
+
+/// Syntax + (optionally) an MX/A/AAAA check that the domain can receive mail.
 pub async fn is_plausible_email(email: &str, check_mx: bool) -> bool {
     let email = email.trim();
-    let ok_syntax = valid_syntax(email);
-    if !ok_syntax {
+    if !valid_syntax(email) {
         return false;
     }
     if !check_mx {
         return true;
     }
-    let domain = email.rsplit('@').next().unwrap_or("").to_string();
-    tokio::task::spawn_blocking(move || {
-        use std::net::ToSocketAddrs;
-        match (domain.as_str(), 0u16).to_socket_addrs() {
-            Ok(mut it) => it.next().is_some(),
-            Err(_) => true, // transient/resolver error — fail open; the code send is the real gate
-        }
-    })
-    .await
-    .unwrap_or(true)
+    let domain = email.rsplit('@').next().unwrap_or("");
+    domain_receives_mail(domain).await
 }
 
 /// Issue a fresh code for `email` (cooldown enforced). Err(detail) on failure.
@@ -231,6 +292,28 @@ mod tests {
             assert!(random_below(1_000_000) < 1_000_000);
         }
         assert_eq!(format!("{:06}", 42), "000042");
+    }
+
+    #[test]
+    fn mail_check_reads_dns_answers_like_python() {
+        use DnsAnswer::*;
+        assert!(receives_mail([Records])); // MX present
+        assert!(receives_mail([NoRecords, Records])); // no MX, but an A record
+        assert!(receives_mail([NoRecords, NoRecords, Records])); // AAAA only
+        assert!(!receives_mail([NoRecords, NoRecords, NoRecords])); // nothing to deliver to
+        assert!(!receives_mail([NoSuchDomain])); // NXDOMAIN
+        assert!(receives_mail([Failed])); // timeout / SERVFAIL: fail open
+        assert!(receives_mail([NoRecords, Failed]));
+    }
+
+    // Live DNS; run with `cargo test -- --ignored`.
+    #[tokio::test]
+    #[ignore]
+    async fn live_dns_lookups() {
+        assert!(domain_receives_mail("gmail.com").await);
+        assert!(!domain_receives_mail("portal-mx-check-does-not-exist.invalid").await);
+        assert!(is_plausible_email("someone@gmail.com", true).await);
+        assert!(!is_plausible_email("someone@portal-mx-check-does-not-exist.invalid", true).await);
     }
 
     #[test]

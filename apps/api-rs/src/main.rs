@@ -1,8 +1,11 @@
+// Handlers and their helpers return `Result<_, axum::response::Response>`, axum's idiom for an
+// early HTTP error; boxing the Response would only add an allocation.
+#![allow(clippy::result_large_err)]
 
 mod auth;
 mod config;
 mod crypto;
-mod lib;
+mod common;
 mod notify;
 mod error;
 mod routes;

@@ -15,13 +15,12 @@ const NONCE_BYTES: usize = 12;
 /// material (so any non-empty string works in dev, as in Python).
 fn derive_key(key_material: &str) -> [u8; 32] {
     for engine in [&URL_SAFE, &URL_SAFE_NO_PAD, &STANDARD_NO_PAD] {
-        if let Ok(decoded) = engine.decode(key_material) {
-            if decoded.len() == 32 {
+        if let Ok(decoded) = engine.decode(key_material)
+            && decoded.len() == 32 {
                 let mut key = [0u8; 32];
                 key.copy_from_slice(&decoded);
                 return key;
             }
-        }
     }
     Sha256::digest(key_material.as_bytes()).into()
 }
@@ -40,10 +39,10 @@ impl TokenCipher {
     pub fn encrypt(&self, plaintext: &str) -> String {
         let mut nonce_bytes = [0u8; NONCE_BYTES];
         getrandom::fill(&mut nonce_bytes).expect("os random");
-        let nonce = Nonce::from_slice(&nonce_bytes);
+        let nonce = Nonce::from(nonce_bytes);
         let ciphertext = self
             .cipher
-            .encrypt(nonce, plaintext.as_bytes())
+            .encrypt(&nonce, plaintext.as_bytes())
             .expect("aes encrypt");
         let mut out = nonce_bytes.to_vec();
         out.extend_from_slice(&ciphertext);
@@ -59,9 +58,10 @@ impl TokenCipher {
             return Err(CryptoError);
         }
         let (nonce, ciphertext) = raw.split_at(NONCE_BYTES);
+        let nonce = Nonce::try_from(nonce).map_err(|_| CryptoError)?;
         let plain = self
             .cipher
-            .decrypt(Nonce::from_slice(nonce), ciphertext)
+            .decrypt(&nonce, ciphertext)
             .map_err(|_| CryptoError)?;
         String::from_utf8(plain).map_err(|_| CryptoError)
     }

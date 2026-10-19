@@ -3,7 +3,6 @@
 
 use std::net::SocketAddr;
 
-use axum::body::Bytes;
 use axum::extract::{ConnectInfo, Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -13,10 +12,10 @@ use serde_json::{json, Value};
 use sqlx::Row;
 use uuid::Uuid;
 
-use crate::lib::{lockout, net, ratelimit};
+use crate::common::{lockout, ratelimit};
 use crate::services::runtime_config::{email_brand, get_email_config};
 use crate::storage::frameio_backend::FrameioStorageBackend;
-use crate::storage::{DestinationConfig, RemoteFile, UploadSession as StorageUploadSession};
+use crate::storage::{DestinationConfig, UploadSession as StorageUploadSession};
 use crate::sync::paths::render_session_prefix;
 use crate::sync::queue::{self, RUN_SYNC_JOB};
 use crate::state::AppState;
@@ -44,11 +43,10 @@ fn link_state_of(revoked_at: Option<DateTime<Utc>>, expires_at: Option<DateTime<
     if revoked_at.is_some() {
         return "revoked";
     }
-    if let Some(exp) = expires_at {
-        if exp <= Utc::now() {
+    if let Some(exp) = expires_at
+        && exp <= Utc::now() {
             return "expired";
         }
-    }
     "ok"
 }
 
@@ -234,11 +232,10 @@ pub async fn verify_link_password(
 
 fn destination_config(config: &Value, folder_override: Option<String>) -> DestinationConfig {
     let mut data = config.clone();
-    if let Some(fid) = folder_override {
-        if let Some(obj) = data.as_object_mut() {
+    if let Some(fid) = folder_override
+        && let Some(obj) = data.as_object_mut() {
             obj.insert("folder_id".to_string(), json!(fid));
         }
-    }
     let t = data.get("type").and_then(|v| v.as_str()).unwrap_or("frameio").to_string();
     DestinationConfig::new(&t, data)
 }
@@ -339,13 +336,11 @@ pub async fn start_session(
     match inserted {
         Ok(id) => {
             let mut res = Json(json!({ "session_id": id.to_string() })).into_response();
-            if row.get::<bool, _>("verify_email") {
-                if let Some(email_str) = email {
-                    if let Ok(v) = axum::http::HeaderValue::from_str(&verify::trust_cookie(&state.settings, email_str)) {
+            if row.get::<bool, _>("verify_email")
+                && let Some(email_str) = email
+                    && let Ok(v) = axum::http::HeaderValue::from_str(&verify::trust_cookie(&state.settings, email_str)) {
                         res.headers_mut().append(axum::http::header::SET_COOKIE, v);
                     }
-                }
-            }
             res
         }
         Err(e) => {
@@ -395,11 +390,10 @@ pub async fn request_file_upload(
         return detail_response(StatusCode::BAD_REQUEST, "This file type is not allowed");
     }
     let max_size: Option<i64> = row.get("max_file_size");
-    if let Some(max) = max_size {
-        if size > max {
+    if let Some(max) = max_size
+        && size > max {
             return detail_response(StatusCode::BAD_REQUEST, "File exceeds the maximum allowed size");
         }
-    }
     let uploader_name: Option<String> = session.get("uploader_name");
     let started_at: Option<DateTime<Utc>> = session.get("started_at");
     let template: Option<String> = row.get("subfolder_template");

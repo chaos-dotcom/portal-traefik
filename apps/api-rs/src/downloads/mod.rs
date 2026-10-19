@@ -18,7 +18,6 @@ pub struct ResolvedFile {
 }
 
 pub struct ResolvedSource {
-    pub account_id: String,
     pub files: Vec<ResolvedFile>,
 }
 
@@ -36,6 +35,32 @@ fn file_from_value(v: &serde_json::Value) -> ResolvedFile {
         media_type: v.get("media_type").and_then(|x| x.as_str()).map(|s| s.to_string()),
         thumbnail_url: thumb,
         path: v.get("path").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+    }
+}
+
+/// The file with this id within the link's source, or None if it isn't part of it — port of
+/// `routes.public_downloads._resolve_file`, the live check for sessions without a snapshot.
+pub async fn resolve_file(client: &FrameioClient, source: &serde_json::Value, file_id: &str) -> Result<Option<ResolvedFile>, FrameioError> {
+    let account_id = source.get("account_id").and_then(|v| v.as_str()).unwrap_or("");
+    match source.get("type").and_then(|v| v.as_str()) {
+        Some("file") => {
+            if source.get("file_id").and_then(|v| v.as_str()) != Some(file_id) {
+                return Ok(None);
+            }
+            Ok(Some(file_from_value(&client.get_file(account_id, file_id).await?)))
+        }
+        Some("selection") => {
+            let listed = source
+                .get("file_ids")
+                .and_then(|v| v.as_array())
+                .is_some_and(|ids| ids.iter().any(|v| v.as_str() == Some(file_id)));
+            if !listed {
+                return Ok(None);
+            }
+            Ok(Some(file_from_value(&client.get_file(account_id, file_id).await?)))
+        }
+        Some("folder") => Ok(resolve_source(client, source).await?.files.into_iter().find(|f| f.id == file_id)),
+        _ => Ok(None),
     }
 }
 
@@ -88,7 +113,7 @@ pub async fn resolve_source(client: &FrameioClient, source: &serde_json::Value) 
         }
         other => return Err(FrameioError::Other(format!("unknown source type: {other:?}"))),
     };
-    Ok(ResolvedSource { account_id, files })
+    Ok(ResolvedSource { files })
 }
 
 /// Per-link text for a download link (logo/accent come from global branding).

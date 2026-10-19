@@ -41,8 +41,8 @@ pub async fn maybe_redirect(
             .and_then(|v| v.as_str())
             .map(|v| v.to_string())
     };
-    if let Some(uid) = uid {
-        if let Ok(id) = Uuid::parse_str(&uid) {
+    if let Some(uid) = uid
+        && let Ok(id) = Uuid::parse_str(&uid) {
             let ok = sqlx::query_scalar::<_, Uuid>("SELECT id FROM users WHERE id = $1 AND is_active")
                 .bind(id)
                 .fetch_optional(&state.db)
@@ -54,7 +54,6 @@ pub async fn maybe_redirect(
                 return None;
             }
         }
-    }
     let mut res = StatusCode::FOUND.into_response();
     res.headers_mut()
         .insert(header::LOCATION, HeaderValue::from_static("/login"));

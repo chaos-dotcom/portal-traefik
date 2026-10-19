@@ -27,6 +27,7 @@ impl DestinationConfig {
 }
 
 #[derive(Clone, Debug)]
+#[allow(dead_code)] // mirrors portal.storage.base.RemoteFile; not every field is read by Frame.io's flows
 pub struct RemoteFile {
     pub id: String,
     pub name: String,
@@ -74,6 +75,7 @@ pub struct UploadChunk {
 }
 
 #[derive(Clone, Debug)]
+#[allow(dead_code)] // mirrors portal.storage.base.UploadCredentials
 pub struct UploadCredentials {
     pub upload_session_id: String,
     pub chunks: Vec<UploadChunk>,
@@ -91,12 +93,3 @@ pub struct ChangeSubscription {
     pub secret: Option<String>,
 }
 
-/// `complete_upload` called before the backend finished assembling the file.
-#[derive(Debug)]
-pub struct UploadNotReady(pub String);
-impl std::fmt::Display for UploadNotReady {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "upload not ready: {}", self.0)
-    }
-}
-impl std::error::Error for UploadNotReady {}

@@ -36,7 +36,7 @@ pub fn provisioning_uri(secret: &str, account: &str) -> String {
 }
 
 fn normalize(code: &str) -> String {
-    code.trim().replace(' ', "").replace('-', "").to_lowercase()
+    code.trim().replace([' ', '-'], "").to_lowercase()
 }
 
 fn hotp(secret_bytes: &[u8], counter: u64) -> u32 {

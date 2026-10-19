@@ -6,7 +6,6 @@
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 
-use crate::frameio::FrameioError;
 use crate::state::AppState;
 
 pub const PATH_TTL_SECONDS: i64 = 3600;
@@ -54,11 +53,10 @@ fn path_is_fresh(config: &Value) -> bool {
 pub fn stamp_path(config: &Value, path: &[Value], project_name: Option<&str>) -> Value {
     let mut out = config.as_object().cloned().unwrap_or_default();
     out.insert("path".to_string(), Value::Array(path.to_vec()));
-    if !out.contains_key("folder_name") {
-        if let Some(name) = path.last().and_then(|s| s.get("name")) {
+    if !out.contains_key("folder_name")
+        && let Some(name) = path.last().and_then(|s| s.get("name")) {
             out.insert("folder_name".to_string(), name.clone());
         }
-    }
     if let Some(p) = project_name {
         out.insert("project_name".to_string(), json!(p));
     }
@@ -85,11 +83,10 @@ pub async fn resolve_folder_path(
     let mut project_name = None;
     if let Ok(project) = client.get_project(account_id, project_id).await {
         project_name = Some(project.name.clone());
-        if let (Some(root), Some(first)) = (project.root_folder_id, path.first()) {
-            if first.get("id").and_then(|v| v.as_str()) == Some(root.as_str()) {
+        if let (Some(root), Some(first)) = (project.root_folder_id, path.first())
+            && first.get("id").and_then(|v| v.as_str()) == Some(root.as_str()) {
                 path[0] = json!({ "id": root, "name": format!("{} (root)", project.name) });
             }
-        }
     }
     Some((path, project_name))
 }
@@ -109,5 +106,3 @@ pub async fn refresh_config_path(state: &AppState, config: &Value) -> Option<Val
     Some(stamp_path(config, &path, project_name.as_deref()))
 }
 
-/// Kept for parity with the Python module's error surface.
-pub type Result<T> = std::result::Result<T, FrameioError>;

@@ -16,7 +16,7 @@ use tokio::sync::Mutex;
 
 use crate::config::Settings;
 use crate::frameio::connection::{get_primary_connection, get_valid_access_token, ConnectionRow};
-use crate::frameio::{FrameioError, FrameOrAdobeId, PickerItem, ProjectItem};
+use crate::frameio::{FrameioError, PickerItem, ProjectItem};
 
 const MAX_RETRIES: u32 = 4;
 const PICKER_PAGE_SIZE: usize = 100;
@@ -30,9 +30,6 @@ fn s(v: &Value, k: &str) -> Option<String> {
 fn i(v: &Value, k: &str) -> Option<i64> {
     v.get(k).and_then(|x| x.as_i64())
 }
-fn arr(v: &Value, k: &str) -> Vec<Value> {
-    v.get(k).and_then(|x| x.as_array()).cloned().unwrap_or_default()
-}
 
 pub struct FrameioClient {
     http: reqwest::Client,
@@ -43,8 +40,11 @@ pub struct FrameioClient {
     /// folder_ancestry), so files sharing a subtree don't re-fetch each ancestor. Entries expire
     /// after FOLDER_META_TTL: the sync engine decides from these walks whether a file is inside a
     /// rule's folder, so a moved folder must be seen again.
-    folder_meta_cache: Mutex<HashMap<String, (String, Option<String>, std::time::Instant)>>,
+    folder_meta_cache: Mutex<HashMap<String, FolderMeta>>,
 }
+
+/// A cached folder's (name, parent_id, fetched_at).
+type FolderMeta = (String, Option<String>, std::time::Instant);
 
 /// How long a cached folder (name, parent) is trusted. Short enough that a folder moved into or
 /// out of a sync rule's folder is noticed within minutes; long enough to spare repeat calls.
@@ -122,8 +122,8 @@ impl FrameioClient {
                     .or_else(|_| Ok(Value::Null));
             }
             // Transient: retry with backoff.
-            if status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
-                if attempt + 1 < MAX_RETRIES {
+            if (status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error())
+                && attempt + 1 < MAX_RETRIES {
                     let wait = resp
                         .headers()
                         .get(reqwest::header::RETRY_AFTER)
@@ -134,7 +134,6 @@ impl FrameioClient {
                     tokio::time::sleep(wait).await;
                     continue;
                 }
-            }
             break;
         }
         match last_status {
@@ -447,11 +446,10 @@ impl FrameioClient {
 
     /// A folder's (name, parent_id), from the cache while the entry is fresh.
     async fn folder_meta(&self, account_id: &str, folder_id: &str) -> Result<(String, Option<String>), FrameioError> {
-        if let Some((name, parent, fetched_at)) = self.folder_meta_cache.lock().await.get(folder_id).cloned() {
-            if fetched_at.elapsed() < FOLDER_META_TTL {
+        if let Some((name, parent, fetched_at)) = self.folder_meta_cache.lock().await.get(folder_id).cloned()
+            && fetched_at.elapsed() < FOLDER_META_TTL {
                 return Ok((name, parent));
             }
-        }
         let folder = self.get_folder(account_id, folder_id).await?;
         self.folder_meta_cache.lock().await.insert(
             folder_id.to_string(),
@@ -587,6 +585,7 @@ impl FrameioClient {
     }
 
     /// Create a share over assets in a project; returns the response data.
+    #[allow(clippy::too_many_arguments)] // one argument per Frame.io share field
     pub async fn create_share(
         &self,
         account_id: &str,
@@ -620,6 +619,3 @@ impl FrameioClient {
         .await
     }
 }
-
-/// SDK type used for account ids (accepts a Frame.io id or an Adobe id).
-pub type _Unused = FrameOrAdobeId;

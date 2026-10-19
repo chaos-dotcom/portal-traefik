@@ -5,7 +5,7 @@
 use redis::AsyncCommands;
 
 use crate::config::Settings;
-use crate::lib::net::client_ip;
+use crate::common::net::client_ip;
 
 /// Ok(()) unless the per-minute budget for (kind, token, client IP) is exceeded.
 pub async fn check(

@@ -24,11 +24,10 @@ pub async fn get_logo(State(state): State<AppState>, headers: HeaderMap) -> Resp
     let updated: Option<chrono::DateTime<chrono::Utc>> = row.get("logo_updated_at");
     let etag = updated.map(|d| format!("\"{}\"", d.timestamp()));
 
-    if let Some(etag) = &etag {
-        if headers.get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok()) == Some(etag.as_str()) {
+    if let Some(etag) = &etag
+        && headers.get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok()) == Some(etag.as_str()) {
             return StatusCode::NOT_MODIFIED.into_response();
         }
-    }
 
     let media_type = content_type.unwrap_or_else(|| "image/png".to_string());
     let mut response = png.into_response();
@@ -41,10 +40,9 @@ pub async fn get_logo(State(state): State<AppState>, headers: HeaderMap) -> Resp
         header::CACHE_CONTROL,
         axum::http::HeaderValue::from_static("public, max-age=300"),
     );
-    if let Some(etag) = etag {
-        if let Ok(v) = axum::http::HeaderValue::from_str(&etag) {
+    if let Some(etag) = etag
+        && let Ok(v) = axum::http::HeaderValue::from_str(&etag) {
             h.insert(header::ETAG, v);
         }
-    }
     response
 }

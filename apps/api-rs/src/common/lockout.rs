@@ -20,11 +20,10 @@ pub async fn check_password_lockout(
         return Ok(());
     }
     let count: Option<i64> = redis.get(key(kind, token)).await.unwrap_or(None);
-    if let Some(c) = count {
-        if c >= settings.password_lockout_max_failures {
+    if let Some(c) = count
+        && c >= settings.password_lockout_max_failures {
             return Err("Too many incorrect password attempts — try again later".to_string());
         }
-    }
     Ok(())
 }
 

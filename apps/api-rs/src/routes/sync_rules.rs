@@ -33,20 +33,6 @@ fn callback_url(state: &AppState, rule_id: Uuid) -> String {
     format!("{}/api/webhooks/frameio/{rule_id}", state.settings.base_url.trim_end_matches('/'))
 }
 
-fn rule_out(rule: &runner::SyncRuleRow, created_at: DateTime<Utc>) -> Value {
-    json!({
-        "id": rule.id.to_string(),
-        "name": rule.source_config.get("__name").and_then(|v| v.as_str()).unwrap_or(""),
-        "source": rule.source_config,
-        "destination_path": rule.destination_path,
-        "conflict_policy": rule.conflict_policy,
-        "path_template": rule.path_template,
-        "enabled": rule.enabled,
-        "subscription_active": rule.frameio_webhook_id.is_some(),
-        "created_at": crate::pyfmt::iso(&created_at),
-    })
-}
-
 fn frameio_status(e: &FrameioError, not_connected_msg: &str, busy_msg: &str, other_msg: &str) -> Response {
     match e {
         FrameioError::NotConnected => detail(StatusCode::CONFLICT, not_connected_msg),
@@ -95,14 +81,13 @@ async fn enrich_source(state: &AppState, source: &Value) -> Result<Value, Respon
         "project_name": project_name,
     });
     let mut path = clean_path(source.get("path"), &folder_id);
-    if path.is_none() {
-        if let Some((p, pn)) = resolve_folder_path(state, &account_id, &project_id, &folder_id).await {
+    if path.is_none()
+        && let Some((p, pn)) = resolve_folder_path(state, &account_id, &project_id, &folder_id).await {
             path = Some(p);
             if let Some(pn) = pn {
                 enriched["project_name"] = json!(pn);
             }
         }
-    }
     if let Some(p) = &path {
         let pn = enriched.get("project_name").and_then(|v| v.as_str()).map(|s| s.to_string());
         enriched = stamp_path(&enriched, p, pn.as_deref());
@@ -132,7 +117,6 @@ async fn fetch_rule(state: &AppState, id: Uuid) -> Option<(runner::SyncRuleRow, 
         path_template: row.get("path_template"),
         source_config: row.get("source_config"),
         frameio_webhook_id: row.get("frameio_webhook_id"),
-        webhook_secret: row.get("webhook_secret"),
         enabled: row.get("enabled"),
     };
     Some((rule, row.get::<String, _>("name"), row.get::<DateTime<Utc>, _>("created_at")))
@@ -165,7 +149,6 @@ pub async fn list_rules(State(state): State<AppState>, _: Admin) -> Response {
                 path_template: r.get("path_template"),
                 source_config: r.get("source_config"),
                 frameio_webhook_id: r.get("frameio_webhook_id"),
-                webhook_secret: r.get("webhook_secret"),
                 enabled: r.get("enabled"),
             };
             rule_json(&r.get::<String, _>("name"), &rule, r.get("created_at"))
@@ -244,13 +227,12 @@ pub async fn update_rule(State(state): State<AppState>, _: Admin, Path(id): Path
     let Some((rule, _, _)) = fetch_rule(&state, id).await else {
         return detail(StatusCode::NOT_FOUND, "Sync rule not found");
     };
-    if let Some(policy) = body.get("conflict_policy").and_then(|v| v.as_str()) {
-        if !CONFLICT_POLICIES.contains(&policy) {
+    if let Some(policy) = body.get("conflict_policy").and_then(|v| v.as_str())
+        && !CONFLICT_POLICIES.contains(&policy) {
             return detail(StatusCode::BAD_REQUEST, "conflict_policy must be one of ['overwrite', 'rename_suffix', 'skip']");
         }
-    }
-    if let Some(enabled) = body.get("enabled").and_then(|v| v.as_bool()) {
-        if enabled != rule.enabled {
+    if let Some(enabled) = body.get("enabled").and_then(|v| v.as_bool())
+        && enabled != rule.enabled {
             let dest = dest_of(&rule);
             if enabled {
                 match subscribe(&state, id, &dest).await {
@@ -266,7 +248,6 @@ pub async fn update_rule(State(state): State<AppState>, _: Admin, Path(id): Path
                     .bind(id).execute(&state.db).await;
             }
         }
-    }
     for key in ["name", "destination_path", "conflict_policy", "path_template"] {
         if body.contains_key(key) {
             let v = body.get(key).unwrap();
@@ -319,7 +300,7 @@ pub async fn list_jobs(State(state): State<AppState>, _: Admin, Path(id): Path<U
     let limit = q.get("limit").and_then(|v| v.parse::<i64>().ok()).unwrap_or(100).clamp(1, 500);
     let rows = sqlx::query("SELECT * FROM sync_jobs WHERE sync_rule_id=$1 ORDER BY created_at DESC LIMIT $2")
         .bind(id).bind(limit).fetch_all(&state.db).await.unwrap_or_default();
-    let out: Vec<Value> = rows.iter().map(|j| job_out(j)).collect();
+    let out: Vec<Value> = rows.iter().map(job_out).collect();
     Json(Value::Array(out)).into_response()
 }
 

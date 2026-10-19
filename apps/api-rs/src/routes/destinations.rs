@@ -24,11 +24,10 @@ fn link_state(row: &sqlx::postgres::PgRow) -> &'static str {
     if revoked.is_some() {
         return "revoked";
     }
-    if let Some(exp) = row.get::<Option<chrono::DateTime<chrono::Utc>>, _>("expires_at") {
-        if exp <= chrono::Utc::now() {
+    if let Some(exp) = row.get::<Option<chrono::DateTime<chrono::Utc>>, _>("expires_at")
+        && exp <= chrono::Utc::now() {
             return "expired";
         }
-    }
     "ok"
 }
 
@@ -230,7 +229,7 @@ pub async fn create_destination(
     stored.insert("folder_name".to_string(), json!(folder.name));
 
     let mut stored = Value::Object(stored);
-    let mut path = clean_path(config.get("path"), folder_id);
+    let path = clean_path(config.get("path"), folder_id);
     let project_name = body
         .get("project_name")
         .and_then(|v| v.as_str())

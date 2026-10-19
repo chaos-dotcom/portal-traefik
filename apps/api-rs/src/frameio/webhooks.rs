@@ -9,7 +9,6 @@ use sha2::Sha256;
 
 pub const TIMESTAMP_HEADER: &str = "x-frameio-request-timestamp";
 pub const SIGNATURE_HEADER: &str = "x-frameio-signature";
-pub const DEFAULT_TOLERANCE_SECONDS: i64 = 300;
 
 pub const SYNC_TRIGGER_EVENTS: [&str; 2] = ["file.upload.completed", "file.ready"];
 
@@ -20,7 +19,6 @@ pub struct WebhookPayload {
     pub project_id: Option<String>,
     pub resource_id: Option<String>,
     pub resource_type: Option<String>,
-    pub user_id: Option<String>,
 }
 
 /// True iff `signature` is a valid, in-window Frame.io signature for `body`.
@@ -73,6 +71,5 @@ pub fn parse_webhook_payload(raw: &Value) -> WebhookPayload {
         project_id: id("project"),
         resource_id: resource.and_then(|r| r.get("id")).and_then(|v| v.as_str()).map(|s| s.to_string()),
         resource_type: resource.and_then(|r| r.get("type")).and_then(|v| v.as_str()).map(|s| s.to_string()),
-        user_id: id("user"),
     }
 }

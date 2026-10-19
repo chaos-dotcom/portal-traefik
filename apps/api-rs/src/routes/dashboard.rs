@@ -103,7 +103,7 @@ pub async fn history(State(state): State<AppState>, _: Admin, Query(q): Query<Hi
         }
     }
 
-    pool.sort_by(|a, b| b.0.cmp(&a.0));
+    pool.sort_by_key(|entry| std::cmp::Reverse(entry.0));
     let window: Vec<Value> = pool
         .into_iter()
         .skip(offset as usize)
@@ -279,7 +279,7 @@ pub async fn transfers(State(state): State<AppState>, _: Admin, Query(q): Query<
         ));
     }
 
-    feed.sort_by(|a, b| b.0.cmp(&a.0));
+    feed.sort_by_key(|entry| std::cmp::Reverse(entry.0));
     let recent: Vec<Value> = feed.into_iter().take(limit as usize).map(|(_, v)| v).collect();
 
     // --- sync health -----------------------------------------------------------

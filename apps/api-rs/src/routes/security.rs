@@ -182,13 +182,11 @@ pub async fn totp_disable(State(state): State<AppState>, admin: Admin, Json(body
     }
     let password = body.get("password").and_then(|v| v.as_str()).unwrap_or("");
     let mut ok = !password.is_empty() && crate::auth::verify_password(password, &password_hash);
-    if !ok {
-        if let (Some(code), Some(enc)) = (body.get("code").and_then(|v| v.as_str()), secret_enc.as_ref()) {
-            if let Ok(secret) = cipher(&state).decrypt(enc) {
+    if !ok
+        && let (Some(code), Some(enc)) = (body.get("code").and_then(|v| v.as_str()), secret_enc.as_ref())
+            && let Ok(secret) = cipher(&state).decrypt(enc) {
                 ok = totp_svc::verify_code(&secret, code);
             }
-        }
-    }
     if !ok {
         return detail(StatusCode::FORBIDDEN, "Provide your current password or a valid code");
     }

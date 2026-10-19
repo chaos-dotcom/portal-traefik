@@ -16,7 +16,6 @@ pub struct TokenSet {
     pub access_token: String,
     pub refresh_token: Option<String>,
     pub expires_at: DateTime<Utc>,
-    pub scopes: String,
 }
 
 #[derive(Debug, Clone)]
@@ -43,7 +42,7 @@ pub struct OAuthConfig {
     pub redirect_uri: String,
 }
 
-fn to_token_set(token: &Value, default_scopes: &str) -> TokenSet {
+fn to_token_set(token: &Value) -> TokenSet {
     let expires_in = token
         .get("expires_in")
         .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
@@ -52,11 +51,6 @@ fn to_token_set(token: &Value, default_scopes: &str) -> TokenSet {
         access_token: token.get("access_token").and_then(|v| v.as_str()).unwrap_or("").to_string(),
         refresh_token: token.get("refresh_token").and_then(|v| v.as_str()).map(|s| s.to_string()),
         expires_at: Utc::now() + Duration::seconds(expires_in),
-        scopes: token
-            .get("scope")
-            .and_then(|v| v.as_str())
-            .unwrap_or(default_scopes)
-            .to_string(),
     }
 }
 
@@ -99,7 +93,7 @@ pub async fn exchange_code(
         return Err(FrameioOAuthError(format!("Token exchange failed: {}", resp.status())));
     }
     let token: Value = resp.json().await.map_err(|_| FrameioOAuthError("Token exchange failed".into()))?;
-    Ok(to_token_set(&token, &config.scopes))
+    Ok(to_token_set(&token))
 }
 
 pub async fn refresh_tokens(
@@ -126,7 +120,7 @@ pub async fn refresh_tokens(
         return Err(FrameioOAuthError(format!("Token refresh failed: {}", resp.status())));
     }
     let token: Value = resp.json().await.map_err(|_| FrameioOAuthError("Token refresh failed".into()))?;
-    Ok(to_token_set(&token, &config.scopes))
+    Ok(to_token_set(&token))
 }
 
 /// GET /v4/me — verifies the token and returns the connected identity.

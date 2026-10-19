@@ -4,7 +4,6 @@
 use std::collections::HashMap;
 
 use axum::extract::{Query, State};
-use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use chrono::{DateTime, Utc};
@@ -13,7 +12,6 @@ use sqlx::Row;
 use uuid::Uuid;
 
 use crate::auth::Admin;
-use crate::error::detail;
 use crate::state::AppState;
 
 fn iso(d: Option<DateTime<Utc>>) -> Value {

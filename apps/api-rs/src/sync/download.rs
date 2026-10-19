@@ -12,7 +12,6 @@ use futures::stream::{FuturesUnordered, StreamExt};
 use sha2::{Digest, Sha256};
 
 pub const CHUNK_SIZE: i64 = 16 * 1024 * 1024;
-pub const DEFAULT_CONCURRENCY: usize = 4;
 
 pub struct DownloadResult {
     pub bytes_written: i64,
@@ -44,21 +43,19 @@ pub async fn download_to_file(
         Some(s) if s <= CHUNK_SIZE => download_single(http, url, tmp_path).await?,
         Some(s) => download_ranged(http, url, s, tmp_path, concurrency).await?,
     };
-    if let Some(expected) = size {
-        if total != expected {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
+    if let Some(expected) = size
+        && total != expected {
+            return Err(std::io::Error::other(
                 format!("size mismatch: expected {expected}, wrote {total}"),
             ));
         }
-    }
     Ok(DownloadResult { bytes_written: total, sha256: sha })
 }
 
 async fn download_single(http: &reqwest::Client, url: &str, tmp_path: &Path) -> std::io::Result<(i64, String)> {
     let resp = http.get(url).send().await.map_err(io_err)?;
     if !resp.status().is_success() {
-        return Err(std::io::Error::new(std::io::ErrorKind::Other, format!("GET {url} -> {}", resp.status())));
+        return Err(std::io::Error::other(format!("GET {url} -> {}", resp.status())));
     }
     let bytes = resp.bytes().await.map_err(io_err)?;
     let mut f = std::fs::File::create(tmp_path)?;
@@ -97,7 +94,7 @@ async fn download_ranged(
                     .map_err(io_err)?;
                 let status = resp.status();
                 if !status.is_success() {
-                    return Err(std::io::Error::new(std::io::ErrorKind::Other, format!("range GET -> {status}")));
+                    return Err(std::io::Error::other(format!("range GET -> {status}")));
                 }
                 let bytes = resp.bytes().await.map_err(io_err)?;
                 Ok::<(i64, bytes::Bytes), std::io::Error>((s, bytes))
@@ -120,5 +117,5 @@ async fn download_ranged(
 }
 
 fn io_err(e: reqwest::Error) -> std::io::Error {
-    std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
+    std::io::Error::other(e.to_string())
 }

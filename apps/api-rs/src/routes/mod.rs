@@ -5,7 +5,6 @@ pub mod dashboard;
 pub mod frameio;
 pub mod destinations;
 pub mod download_links;
-pub mod guarded;
 pub mod security;
 pub mod settings;
 pub mod sync_jobs;

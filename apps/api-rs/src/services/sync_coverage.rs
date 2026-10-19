@@ -40,13 +40,11 @@ pub fn rules_covering<'a>(dest_config: &Value, rules: &'a [Rule]) -> Vec<(&'a Ru
         let rule_folder = src.get("folder_id").and_then(|v| v.as_str());
         if rule_folder == Some(folder_id) {
             out.push((rule, true));
-        } else if src.get("recursive").map(|v| v.as_bool().unwrap_or(true)).unwrap_or(true) {
-            if let Some(rf) = rule_folder {
-                if ancestors.iter().any(|a| a == rf) {
+        } else if src.get("recursive").map(|v| v.as_bool().unwrap_or(true)).unwrap_or(true)
+            && let Some(rf) = rule_folder
+                && ancestors.iter().any(|a| a == rf) {
                     out.push((rule, false));
                 }
-            }
-        }
     }
     out
 }

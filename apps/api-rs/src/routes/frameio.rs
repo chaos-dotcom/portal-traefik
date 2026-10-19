@@ -10,7 +10,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::{json, Value};
 
-use crate::auth::{session_user_id, Admin, SessionExt};
+use crate::auth::{Admin, SessionExt};
 use crate::error::detail;
 use crate::frameio::connection::oauth_config;
 use crate::frameio::{oauth, FrameioError};
@@ -128,7 +128,7 @@ pub async fn disconnect(State(state): State<AppState>, admin: Admin) -> Response
     Json(json!({ "ok": true })).into_response()
 }
 
-async fn picker(state: &AppState, f: impl std::future::Future<Output = Result<Vec<crate::frameio::PickerItem>, FrameioError>>) -> Response {
+async fn picker(_state: &AppState, f: impl std::future::Future<Output = Result<Vec<crate::frameio::PickerItem>, FrameioError>>) -> Response {
     match f.await {
         Ok(items) => Json(json!(items
             .iter()

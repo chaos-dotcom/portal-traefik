@@ -169,6 +169,7 @@ fn file_list_html(files: &[UploadedFile]) -> String {
     format!("<ul style=\"margin:0 0 16px;padding-left:18px\">{rows}</ul>")
 }
 
+#[allow(clippy::too_many_arguments)] // mirrors Python's keyword-only render_upload_completion
 pub fn render_upload_completion(
     link_name: &str, uploader_name: Option<&str>, uploader_email: Option<&str>, uploader_message: Option<&str>,
     files: &[UploadedFile], total_bytes: i64, duration_seconds: f64, brand: &EmailBrand,
@@ -205,6 +206,7 @@ pub fn render_upload_completion(
     (subject, text, html)
 }
 
+#[allow(clippy::too_many_arguments)] // mirrors Python's keyword-only send_upload_completion
 pub async fn send_upload_completion(
     config: &EmailConfig, link_name: &str, uploader_name: Option<&str>, uploader_email: Option<&str>,
     uploader_message: Option<&str>, files: &[UploadedFile], total_bytes: i64, duration_seconds: f64, brand: &EmailBrand,
