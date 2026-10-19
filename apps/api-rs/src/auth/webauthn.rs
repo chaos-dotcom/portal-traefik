@@ -66,7 +66,10 @@ pub async fn register_begin(State(state): State<AppState>, admin: Admin, Session
             if let Ok(serialized) = serde_json::to_string(&reg_state) {
                 session.lock().unwrap().set(REG_CHALLENGE, json!(serialized));
             }
-            Json(ccr).into_response()
+            // The page hands this to @simplewebauthn/browser's startRegistration, which takes the
+            // bare PublicKeyCredentialCreationOptionsJSON (what py_webauthn returns), not
+            // webauthn-rs's {"publicKey": …} wrapper.
+            Json(ccr.public_key).into_response()
         }
         Err(e) => detail(StatusCode::BAD_REQUEST, &format!("{e}")),
     }
@@ -135,7 +138,8 @@ pub async fn login_begin(State(state): State<AppState>, SessionExt(session): Ses
             if let Ok(serialized) = serde_json::to_string(&auth_state) {
                 session.lock().unwrap().set(AUTH_CHALLENGE, json!(serialized));
             }
-            Json(acr).into_response()
+            // Likewise the bare request options for startAuthentication.
+            Json(acr.public_key).into_response()
         }
         Err(e) => detail(StatusCode::BAD_REQUEST, &format!("{e}")),
     }
