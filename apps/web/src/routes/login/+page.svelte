@@ -90,7 +90,11 @@
     {#if totpRequired}
       <form onsubmit={submitTotp} class="space-y-4">
         <p class="text-sm text-muted">Enter the 6-digit code from your authenticator app (or a recovery code).</p>
+        <!-- id/name/label name it a one-time code, so password managers offer the stored TOTP -->
+        <label for="totp" class="sr-only">Authentication code</label>
         <input
+          id="totp"
+          name="totp"
           bind:value={code}
           required
           inputmode="numeric"
