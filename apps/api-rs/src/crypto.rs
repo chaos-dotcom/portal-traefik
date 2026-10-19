@@ -122,11 +122,11 @@ impl std::error::Error for CryptoError {}
 
 /// Columns holding a `TokenCipher` ciphertext: (table, column).
 const ENCRYPTED_COLUMNS: [(&str, &str); 5] = [
-    ("users", "totp_secret_encrypted"),
-    ("app_settings", "smtp_password_encrypted"),
-    ("app_settings", "frameio_client_secret_encrypted"),
-    ("frameio_connections", "access_token_encrypted"),
-    ("frameio_connections", "refresh_token_encrypted"),
+    ("public.users", "totp_secret_encrypted"),
+    ("public.app_settings", "smtp_password_encrypted"),
+    ("public.app_settings", "frameio_client_secret_encrypted"),
+    ("public.frameio_connections", "access_token_encrypted"),
+    ("public.frameio_connections", "refresh_token_encrypted"),
 ];
 
 /// Re-encrypt, under the Python-compatible key, every value an earlier Rust build wrote with its

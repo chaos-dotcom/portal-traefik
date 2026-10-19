@@ -68,7 +68,9 @@ pub async fn migrate(settings: &crate::config::Settings) -> anyhow::Result<()> {
     // A dedicated connection: pg_dump's preamble resets search_path for the session, which must
     // not leak into the pool the API uses.
     let mut conn = PgConnection::connect(&settings.database_url).await?;
-    schema(&mut conn).await?;
+    if schema(&mut conn).await? == Schema::Created {
+        return Ok(()); // a fresh database holds no secrets to re-encrypt
+    }
     let rekeyed = crate::crypto::rekey_legacy_values(&mut conn, &settings.token_encryption_key).await?;
     if rekeyed > 0 {
         tracing::info!("migrate: re-encrypted {rekeyed} secret(s) written under the old Rust key derivation");
@@ -76,7 +78,15 @@ pub async fn migrate(settings: &crate::config::Settings) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn schema(conn: &mut PgConnection) -> anyhow::Result<()> {
+#[derive(PartialEq)]
+enum Schema {
+    /// Applied `schema.sql` to an empty database.
+    Created,
+    /// The database already had a schema (now at the head revision).
+    Existing,
+}
+
+async fn schema(conn: &mut PgConnection) -> anyhow::Result<Schema> {
     let head = head_revision();
 
     let has_schema: bool = sqlx::query_scalar("SELECT to_regclass('public.users') IS NOT NULL")
@@ -86,7 +96,9 @@ async fn schema(conn: &mut PgConnection) -> anyhow::Result<()> {
         tracing::info!("migrate: empty database, applying schema at {head}");
         // AssertSqlSafe: the shipped schema file, not user input.
         sqlx::raw_sql(sqlx::AssertSqlSafe(strip_psql_meta(SCHEMA))).execute(&mut *conn).await?;
-        return Ok(());
+        // pg_dump's preamble emptied search_path for this session; put it back for what follows.
+        sqlx::query("RESET search_path").execute(&mut *conn).await?;
+        return Ok(Schema::Created);
     }
 
     let current: Option<String> = sqlx::query("SELECT version_num FROM alembic_version")
@@ -101,11 +113,11 @@ async fn schema(conn: &mut PgConnection) -> anyhow::Result<()> {
             .bind(head)
             .execute(&mut *conn)
             .await?;
-        return Ok(());
+        return Ok(Schema::Existing);
     };
     if current == head {
         tracing::info!("migrate: schema is at {head}");
-        return Ok(());
+        return Ok(Schema::Existing);
     }
     let Some(steps) = plan(MIGRATIONS, &current, head) else {
         anyhow::bail!(
@@ -125,7 +137,7 @@ async fn schema(conn: &mut PgConnection) -> anyhow::Result<()> {
             .await?;
     }
     tracing::info!("migrate: schema is at {head}");
-    Ok(())
+    Ok(Schema::Existing)
 }
 
 #[cfg(test)]
