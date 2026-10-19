@@ -14,13 +14,21 @@ use crate::state::AppState;
 use crate::sync::queue::{self, RUN_SYNC_JOB};
 
 pub async fn retry_job(State(state): State<AppState>, admin: Admin, Path(id): Path<Uuid>) -> Response {
-    let exists: Option<Uuid> = sqlx::query_scalar("SELECT id FROM sync_jobs WHERE id=$1").bind(id).fetch_optional(&state.db).await.ok().flatten();
-    if exists.is_none() {
+    let status: Option<String> = sqlx::query_scalar("SELECT status FROM sync_jobs WHERE id=$1").bind(id).fetch_optional(&state.db).await.ok().flatten();
+    let Some(status) = status else {
         return detail(StatusCode::NOT_FOUND, "sync job not found");
+    };
+    if status == "running" {
+        // Resetting it would queue a second download of the same file next to the live one.
+        return detail(StatusCode::CONFLICT, "This job is running right now");
     }
-    let _ = sqlx::query(
-        "UPDATE sync_jobs SET status='pending', retry_count=0, error=NULL, started_at=NULL, completed_at=NULL, source_wait_started_at=NULL, updated_at=now() WHERE id=$1",
+    // Guarded on status too, so a worker claiming the job in between still wins.
+    let reset = sqlx::query(
+        "UPDATE sync_jobs SET status='pending', retry_count=0, error=NULL, started_at=NULL, completed_at=NULL, source_wait_started_at=NULL, updated_at=now() WHERE id=$1 AND status <> 'running'",
     ).bind(id).execute(&state.db).await;
+    if matches!(reset, Ok(r) if r.rows_affected() == 0) {
+        return detail(StatusCode::CONFLICT, "This job is running right now");
+    }
     let _ = sqlx::query("INSERT INTO audit_log (user_id, action, detail) VALUES ($1,'sync_job.retried',$2)")
         .bind(admin.id).bind(json!({ "sync_job_id": id.to_string() })).execute(&state.db).await;
     let mut redis = state.redis.clone();

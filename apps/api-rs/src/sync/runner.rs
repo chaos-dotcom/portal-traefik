@@ -8,12 +8,17 @@ use uuid::Uuid;
 use crate::config::Settings;
 use crate::frameio::FrameioError;
 use crate::storage::frameio_backend::FrameioStorageBackend;
-use crate::storage::DestinationConfig;
+use crate::storage::{DestinationConfig, RemoteFile};
 use crate::sync::destination::{arm_destination, check_destination, DestinationUnavailable};
 use crate::sync::download::download_to_file;
 use crate::sync::paths::{resolve_conflict, resolve_destination, PathContext};
 
 pub const DOWNLOADABLE_STATUSES: [&str; 2] = ["uploaded", "transcoded"];
+
+/// Error recorded on a job skipped because its file isn't inside the rule's folder. Not final:
+/// files and folders get moved, so reconcile re-runs such a job once the file shows up in the
+/// rule's own listing.
+pub const OUT_OF_SCOPE: &str = "outside the rule's source folder";
 
 #[derive(Debug)]
 pub enum JobError {
@@ -21,6 +26,19 @@ pub enum JobError {
     DestinationUnavailable(String),
     Frameio(FrameioError),
     Other(String),
+}
+
+/// The text recorded on a failed job, like Python's `_unwrap_error` (`"Type: message"`), so the
+/// job list shows the real cause rather than an internal enum dump.
+impl std::fmt::Display for JobError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            JobError::SourceNotReady(m) => write!(f, "SourceNotReady: {m}"),
+            JobError::DestinationUnavailable(m) => write!(f, "DestinationUnavailable: {m}"),
+            JobError::Frameio(e) => write!(f, "FrameioError: {e}"),
+            JobError::Other(m) => write!(f, "{m}"),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -132,19 +150,51 @@ pub fn is_orphaned(job: &SyncJobRow, now: DateTime<Utc>, stale_after_seconds: i6
     }
 }
 
+/// A "pending" job waits on a queued task — its first run, or the retry its last failure
+/// scheduled. Untouched for longer than any such task takes to come due, that task was lost (the
+/// worker restarted before picking it up, or the queued task expired), and nothing else will ever
+/// run the job: the file strands forever. Measured from `updated_at` (bumped whenever the row is
+/// touched) so a job re-enqueued moments ago isn't immediately re-queued again.
 pub fn is_stranded_pending(job: &SyncJobRow, now: DateTime<Utc>, stale_after_seconds: i64) -> bool {
-    if job.status != "pending" || job.started_at.is_some() {
+    if job.status != "pending" {
         return false;
     }
     (now - job.updated_at).num_seconds() > stale_after_seconds
 }
 
-fn in_scope(rule: &SyncRuleRow, parent_id: Option<&str>) -> bool {
-    let recursive = rule.source_config.get("recursive").and_then(|v| v.as_bool()).unwrap_or(true);
+/// A "waiting" job is re-checked every `sync_source_poll_seconds` and each check touches the row,
+/// so one untouched for far longer has lost its scheduled re-check (the queued task was dropped,
+/// or the run that superseded it died) and would otherwise wait forever.
+pub fn is_stranded_waiting(job: &SyncJobRow, now: DateTime<Utc>, stale_after_seconds: i64) -> bool {
+    if job.status != "waiting" {
+        return false;
+    }
+    (now - job.updated_at).num_seconds() > stale_after_seconds
+}
+
+/// A non-recursive rule only takes files directly in its folder; a recursive one takes files
+/// anywhere beneath it. Webhooks and upload triggers match a whole project, so this is the check
+/// that keeps a sibling folder (e.g. OUT next to a rule on IN) from syncing into the destination:
+/// `relative_dir` is None when the file's ancestry never reaches the rule's folder.
+fn in_scope(source_config: &serde_json::Value, remote: &RemoteFile) -> bool {
+    if remote.relative_dir.is_none() {
+        return false;
+    }
+    let recursive = source_config.get("recursive").and_then(|v| v.as_bool()).unwrap_or(true);
     if recursive {
         return true;
     }
-    parent_id == rule.source_config.get("folder_id").and_then(|v| v.as_str())
+    remote.parent_id.as_deref() == source_config.get("folder_id").and_then(|v| v.as_str())
+}
+
+/// The reconcile thresholds for (pending, waiting) jobs that lost their queued task: comfortably
+/// past any live task's due time (the longest retry backoff, the re-check cadence).
+pub fn stranded_thresholds(settings: &Settings) -> (i64, i64) {
+    let stale_floor = settings.sync_pending_stale_seconds;
+    let longest_backoff = settings.sync_retry_base_seconds * 2i64.pow((settings.sync_max_retries - 2).max(0) as u32);
+    let pending_stale_after = stale_floor.max(3 * longest_backoff);
+    let waiting_stale_after = stale_floor.max(3 * settings.sync_source_poll_seconds);
+    (pending_stale_after, waiting_stale_after)
 }
 
 /// Run one sync job to completion, setting its terminal fields.
@@ -182,23 +232,28 @@ pub async fn execute_job(
         Err(e) => return Err(JobError::Frameio(e)),
     };
 
+    // Scope first: a file outside the rule's folder is never synced, so don't wait on it.
+    if !in_scope(&rule.source_config, &remote) {
+        job.status = "skipped".to_string();
+        job.completed_at = Some(Utc::now());
+        job.error = Some(OUT_OF_SCOPE.to_string());
+        tracing::info!("sync.job.skipped_out_of_scope job_id={} file_id={}", job.id, job.frameio_file_id);
+        return Ok(());
+    }
+
+    // Wait for the original to be downloadable. Frame.io reports a status; if it's not yet a
+    // downloadable one, defer (the worker re-queues patiently without burning the retry budget).
     if let Some(status) = &remote.status {
         if !DOWNLOADABLE_STATUSES.contains(&status.as_str()) {
             return Err(JobError::SourceNotReady(format!("file status is '{status}', not yet downloadable")));
         }
     }
 
-    if !in_scope(&rule, remote.parent_id.as_deref()) {
-        job.status = "skipped".to_string();
-        job.completed_at = Some(Utc::now());
-        return Ok(());
-    }
-
     let ctx = PathContext {
         filename: remote.name.clone(),
         project: rule.source_config.get("project_name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
         folder: rule.source_config.get("folder_name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-        subfolder: remote.relative_dir.clone(),
+        subfolder: remote.relative_dir.clone().unwrap_or_default(),
         uploader_name: String::new(),
         when: Some(chrono::Local::now()),
     };
@@ -258,7 +313,8 @@ pub async fn reclaim_orphaned_running(db: &PgPool) -> sqlx::Result<Vec<Uuid>> {
     Ok(ids)
 }
 
-/// Create + enqueue jobs for files in a rule's folder that lack one. Returns the count.
+/// Create jobs for files in a rule's folder that lack one (and reset ones that need another go).
+/// Returns the ids to enqueue.
 pub async fn reconcile_rule(
     db: &PgPool,
     rule_id: Uuid,
@@ -281,12 +337,14 @@ pub async fn reconcile_rule(
 
     let now = Utc::now();
     let stale_after = settings.sync_job_timeout_seconds;
-    let pending_stale_after = settings.sync_pending_stale_seconds;
+    let (pending_stale_after, waiting_stale_after) = stranded_thresholds(settings);
+    // Returned to the caller, which enqueues them: every write above has committed by then, so a
+    // worker never picks up a task for a row it can't see yet.
     let mut created: Vec<Uuid> = Vec::new();
 
     for f in files {
         let existing = sqlx::query(
-            "SELECT id, status, started_at, updated_at FROM sync_jobs WHERE sync_rule_id = $1 AND frameio_file_id = $2",
+            "SELECT id, status, error, started_at, updated_at FROM sync_jobs WHERE sync_rule_id = $1 AND frameio_file_id = $2",
         )
         .bind(rule.id)
         .bind(&f.id)
@@ -314,7 +372,7 @@ pub async fn reconcile_rule(
                     status: row.get("status"),
                     bytes: None,
                     sha256: None,
-                    error: None,
+                    error: row.get("error"),
                     retry_count: 0,
                     started_at: row.get("started_at"),
                     completed_at: None,
@@ -322,9 +380,16 @@ pub async fn reconcile_rule(
                     updated_at: row.get("updated_at"),
                     source_wait_started_at: None,
                 };
+                // Self-heal: a transient failure (a network blip), a job left "running" by a
+                // killed worker, one whose queued task (or re-check) was lost, or a file moved
+                // into the folder shouldn't strand a file. Reset + re-attempt.
                 if job.status == "dead_letter"
                     || is_orphaned(&job, now, stale_after)
                     || is_stranded_pending(&job, now, pending_stale_after)
+                    || is_stranded_waiting(&job, now, waiting_stale_after)
+                    // Skipped as outside the rule's folder, yet it's in the rule's listing: it
+                    // has been moved in since, so it's due a sync after all.
+                    || (job.status == "skipped" && job.error.as_deref() == Some(OUT_OF_SCOPE))
                 {
                     sqlx::query(
                         "UPDATE sync_jobs SET status='pending', retry_count=0, error=NULL, started_at=NULL, completed_at=NULL, source_wait_started_at=NULL, updated_at=now() WHERE id=$1",
@@ -339,4 +404,85 @@ pub async fn reconcile_rule(
         }
     }
     Ok(created)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Duration;
+    use serde_json::json;
+
+    fn job(status: &str, updated_ago_s: i64) -> SyncJobRow {
+        let now = Utc::now();
+        SyncJobRow {
+            id: Uuid::nil(),
+            sync_rule_id: Uuid::nil(),
+            frameio_file_id: "f".into(),
+            status: status.into(),
+            bytes: None,
+            sha256: None,
+            error: None,
+            retry_count: 0,
+            started_at: Some(now),
+            completed_at: None,
+            created_at: now,
+            updated_at: now - Duration::seconds(updated_ago_s),
+            source_wait_started_at: None,
+        }
+    }
+
+    fn remote(parent: &str, relative_dir: Option<&str>) -> RemoteFile {
+        RemoteFile { parent_id: Some(parent.into()), relative_dir: relative_dir.map(str::to_string), ..Default::default() }
+    }
+
+    #[test]
+    fn scope_excludes_files_outside_the_rule_folder() {
+        let recursive = json!({ "folder_id": "IN" });
+        let flat = json!({ "folder_id": "IN", "recursive": false });
+        // A sibling folder (OUT next to IN): the ancestry walk never reached IN.
+        assert!(!in_scope(&recursive, &remote("OUT", None)));
+        assert!(!in_scope(&flat, &remote("OUT", None)));
+        // Directly in the rule folder, and nested below it.
+        assert!(in_scope(&recursive, &remote("IN", Some(""))));
+        assert!(in_scope(&recursive, &remote("SUB", Some("Dailies/Monday"))));
+        assert!(in_scope(&flat, &remote("IN", Some(""))));
+        assert!(!in_scope(&flat, &remote("SUB", Some("Dailies")))); // non-recursive: root only
+    }
+
+    #[test]
+    fn default_remote_file_sits_in_the_root() {
+        assert_eq!(RemoteFile::default().relative_dir.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn stranded_checks_look_at_status_and_staleness() {
+        let now = Utc::now();
+        // A pending job counts as stranded once stale, even after an earlier attempt started it.
+        assert!(is_stranded_pending(&job("pending", 4000), now, 3600));
+        assert!(!is_stranded_pending(&job("pending", 10), now, 3600));
+        assert!(!is_stranded_pending(&job("waiting", 4000), now, 3600));
+        assert!(is_stranded_waiting(&job("waiting", 4000), now, 3600));
+        assert!(!is_stranded_waiting(&job("waiting", 10), now, 3600));
+        assert!(!is_stranded_waiting(&job("pending", 4000), now, 3600));
+    }
+
+    #[test]
+    fn stranded_thresholds_clear_the_longest_live_wait() {
+        let mut s = crate::config::Settings::from_env();
+        s.sync_pending_stale_seconds = 1800;
+        s.sync_retry_base_seconds = 30;
+        s.sync_max_retries = 5;
+        s.sync_source_poll_seconds = 120;
+        // Longest backoff 30 * 2^3 = 240s; floors win at these defaults.
+        assert_eq!(stranded_thresholds(&s), (1800, 1800));
+        s.sync_retry_base_seconds = 600; // 600 * 8 = 4800 → 3x = 14400
+        s.sync_source_poll_seconds = 900; // 3x = 2700
+        assert_eq!(stranded_thresholds(&s), (14400, 2700));
+    }
+
+    #[test]
+    fn job_errors_read_like_python() {
+        assert_eq!(JobError::Frameio(FrameioError::NotFound).to_string(), "FrameioError: Frame.io entity not found");
+        assert_eq!(JobError::Other("disk full".into()).to_string(), "disk full");
+    }
 }

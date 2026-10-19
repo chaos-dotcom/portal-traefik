@@ -48,7 +48,16 @@ fn require_usable(row: &sqlx::postgres::PgRow) -> Result<(), Response> {
     Ok(())
 }
 
-pub async fn resolve_link(State(state): State<AppState>, Path(token): Path<String>) -> Response {
+pub async fn resolve_link(
+    State(state): State<AppState>,
+    Path(token): Path<String>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> Response {
+    let mut redis = state.redis.clone();
+    if let Err(msg) = ratelimit::check(&mut redis, &state.settings, "default", &token, &headers, Some(peer)).await {
+        return crate::error::detail(StatusCode::TOO_MANY_REQUESTS, &msg);
+    }
     let row = match link_row(&state, &token).await {
         Ok(r) => r,
         Err(r) => return r,
@@ -305,5 +314,18 @@ pub async fn file_download_url(
     .bind(session.get::<Uuid, _>("id")).bind(&file_id).bind(file_name).bind(file_size).bind(&ip).bind(&user_agent)
     .execute(&state.db).await;
 
-    Json(json!({ "url": download.url })).into_response()
+    let mut res = Json(json!({ "url": download.url })).into_response();
+    // Slide the device trust window on real activity — only for an address this browser already
+    // verified. A session started before the link switched verification on carries an unverified
+    // email, and minting trust for it would let it pass upload links' verification too.
+    let viewer_email: Option<String> = session.get("viewer_email");
+    if let Some(email) = viewer_email.filter(|e| !e.is_empty()) {
+        let cookies = headers.get("cookie").and_then(|v| v.to_str().ok()).unwrap_or("");
+        if row.get::<bool, _>("verify_email") && verify::is_trusted(&state.settings, cookies, &email) {
+            if let Ok(v) = axum::http::HeaderValue::from_str(&verify::trust_cookie(&state.settings, &email)) {
+                res.headers_mut().append(axum::http::header::SET_COOKIE, v);
+            }
+        }
+    }
+    res
 }

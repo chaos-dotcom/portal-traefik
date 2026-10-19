@@ -70,7 +70,16 @@ fn or_else(a: Option<String>, b: Option<String>) -> Option<String> {
     }
 }
 
-pub async fn resolve_link(State(state): State<AppState>, Path(token): Path<String>) -> Response {
+pub async fn resolve_link(
+    State(state): State<AppState>,
+    Path(token): Path<String>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> Response {
+    let mut redis = state.redis.clone();
+    if let Err(msg) = ratelimit::check(&mut redis, &state.settings, "default", &token, &headers, Some(peer)).await {
+        return detail_response(StatusCode::TOO_MANY_REQUESTS, &msg);
+    }
     let row = match link_row(&state, &token).await {
         Ok(r) => r,
         Err(r) => return r,
@@ -192,7 +201,17 @@ pub async fn verify_link_code(
     res
 }
 
-pub async fn verify_link_password(State(state): State<AppState>, Path(token): Path<String>, Json(body): Json<Value>) -> Response {
+pub async fn verify_link_password(
+    State(state): State<AppState>,
+    Path(token): Path<String>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    let mut redis = state.redis.clone();
+    if let Err(msg) = ratelimit::check(&mut redis, &state.settings, "strict", &token, &headers, Some(peer)).await {
+        return detail_response(StatusCode::TOO_MANY_REQUESTS, &msg);
+    }
     let row = match link_row(&state, &token).await {
         Ok(r) => r,
         Err(r) => return r,
@@ -201,7 +220,6 @@ pub async fn verify_link_password(State(state): State<AppState>, Path(token): Pa
     if password_hash.is_none() {
         return Json(json!({ "ok": link_state_of(row.get("revoked_at"), row.get("expires_at")) == "ok" })).into_response();
     }
-    let mut redis = state.redis.clone();
     if let Err(msg) = lockout::check_password_lockout(&mut redis, &state.settings, "upload", &token).await {
         return detail_response(StatusCode::TOO_MANY_REQUESTS, &msg);
     }
@@ -273,6 +291,16 @@ pub async fn start_session(
     let name = body.get("name").and_then(|v| v.as_str());
     let email = body.get("email").and_then(|v| v.as_str());
     let message = body.get("message").and_then(|v| v.as_str());
+    // Size of the whole batch the uploader selected. Known up front in the browser, so the
+    // dashboard can show the real total for an in-flight upload rather than summing the files
+    // registered so far (which grows as the upload progresses).
+    let total_bytes = match body.get("total_bytes") {
+        None | Some(Value::Null) => None,
+        Some(v) => match v.as_i64() {
+            Some(n) if n >= 0 => Some(n),
+            _ => return detail_response(StatusCode::UNPROCESSABLE_ENTITY, "total_bytes must be a non-negative integer"),
+        },
+    };
     let provided = [("name", name), ("email", email), ("message", message)];
     let missing: Vec<&str> = provided
         .iter()
@@ -303,10 +331,10 @@ pub async fn start_session(
     let link_id: Uuid = row.get("id");
     // upload_sessions.status has no DB default.
     let inserted = sqlx::query_scalar::<_, Uuid>(
-        "INSERT INTO upload_sessions (upload_link_id, uploader_name, uploader_email, uploader_message, status, started_at)
-         VALUES ($1,$2,$3,$4,'in_progress',now()) RETURNING id",
+        "INSERT INTO upload_sessions (upload_link_id, uploader_name, uploader_email, uploader_message, status, started_at, total_bytes)
+         VALUES ($1,$2,$3,$4,'in_progress',now(),$5) RETURNING id",
     )
-    .bind(link_id).bind(name).bind(email).bind(message)
+    .bind(link_id).bind(name).bind(email).bind(message).bind(total_bytes)
     .fetch_one(&state.db).await;
     match inserted {
         Ok(id) => {
@@ -453,8 +481,8 @@ pub async fn complete_file(
         let mut redis = state.redis.clone();
         let fid = file_id.clone();
         tokio::spawn(async move {
-            let created = crate::sync::events::trigger_sync_for_upload(&db, &account, &folder, &[fid]).await;
-            for job_id in created {
+            let to_run = crate::sync::events::trigger_sync_for_upload(&db, &account, &folder, &[fid]).await;
+            for job_id in to_run {
                 let _ = queue::enqueue(&mut redis, RUN_SYNC_JOB, &job_id.to_string(), 0.0).await;
             }
         });
@@ -465,6 +493,7 @@ pub async fn complete_file(
 pub async fn complete_session(
     State(state): State<AppState>,
     Path((token, session_id)): Path<(String, String)>,
+    headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
     let row = match link_row(&state, &token).await {
@@ -476,9 +505,34 @@ pub async fn complete_session(
         Ok(s) => s,
         Err(r) => return r,
     };
+    let uploader_name: Option<String> = session.get("uploader_name");
+    let uploader_email: Option<String> = session.get("uploader_email");
+    let uploader_message: Option<String> = session.get("uploader_message");
+
+    // The uploader's email, if this browser proved it owns it: a verified link plus the matching
+    // device-trust cookie. Gates both sliding the trust window and the delivery receipt — never
+    // extend trust to, or mail, an address this browser didn't verify (say, a session started
+    // before the link switched verification on), or anyone could have Portal mail any inbox.
+    let cookies = headers.get("cookie").and_then(|v| v.to_str().ok()).unwrap_or("");
+    let verified_email: Option<String> = match &uploader_email {
+        Some(e) if row.get::<bool, _>("verify_email") && !e.is_empty() && verify::is_trusted(&state.settings, cookies, e) => {
+            Some(e.trim().to_string())
+        }
+        _ => None,
+    };
+    // Notify (admin + receipt) on the first completion only: the browser retries a completion
+    // whose response it lost, and a replayed call mustn't mail anyone again.
+    let first_completion = session.get::<String, _>("status") != "completed";
     let total_bytes = body.get("total_bytes").and_then(|v| v.as_i64());
-    let _ = sqlx::query("UPDATE upload_sessions SET status='completed', completed_at=now(), total_bytes=$1, updated_at=now() WHERE id=$2")
-        .bind(total_bytes).bind(session.get::<Uuid, _>("id")).execute(&state.db).await;
+    // The last heartbeat lags the real end of the upload; a completed session moved everything.
+    let _ = sqlx::query(
+        "UPDATE upload_sessions SET status='completed', completed_at=now(),
+                total_bytes=COALESCE($1, total_bytes), uploaded_bytes=COALESCE($1, uploaded_bytes),
+                updated_at=now()
+          WHERE id=$2",
+    )
+    .bind(total_bytes).bind(session.get::<Uuid, _>("id")).execute(&state.db).await;
+    tracing::info!("public.upload.session_completed session_id={session_id}");
 
     // Snapshot the notification inputs before the session is gone.
     let entries: Vec<Value> = session.get::<Option<Value>, _>("frameio_asset_ids").and_then(|v| v.as_array().cloned()).unwrap_or_default();
@@ -486,48 +540,68 @@ pub async fn complete_session(
         name: e.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
         size: e.get("size").and_then(|v| v.as_i64()),
     }).collect();
-    let total = total_bytes.unwrap_or_else(|| files.iter().filter_map(|f| f.size).sum());
+    // Python: `body.total_bytes or sum(...)` — a 0 total falls back to the per-file sum too.
+    let total = total_bytes.filter(|t| *t != 0).unwrap_or_else(|| files.iter().filter_map(|f| f.size).sum());
     let started_at: Option<DateTime<Utc>> = session.get("started_at");
-    let duration = started_at.map(|s| (Utc::now() - s).num_seconds() as f64).unwrap_or(0.0);
+    let duration = started_at.map(|s| (Utc::now() - s).num_milliseconds() as f64 / 1000.0).unwrap_or(0.0);
     let link_name = row.get::<Option<String>, _>("brand_display_name")
         .filter(|s| !s.is_empty())
         .or_else(|| row.get::<Option<String>, _>("destination_name"))
         .unwrap_or_default();
-    let uploader_name: Option<String> = session.get("uploader_name");
-    let uploader_email: Option<String> = session.get("uploader_email");
-    let uploader_message: Option<String> = session.get("uploader_message");
     let cfg = row.get::<Value, _>("destination_config").as_object().cloned().unwrap_or_default();
     let account = cfg.get("account_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let folder = cfg.get("folder_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let file_ids: Vec<String> = entries.iter().filter_map(|e| e.get("file_id").and_then(|v| v.as_str()).map(|s| s.to_string())).collect();
 
-    // Background: the completion email + the sync trigger.
+    // Background: the completion email, the uploader's receipt and the sync trigger.
     let email_config = get_email_config(&state.db, &state.settings).await;
     let brand = email_brand(&state.db, &state.settings).await;
-    tokio::spawn(async move {
-        crate::notify::send_upload_completion(
-            &email_config, &link_name, uploader_name.as_deref(), uploader_email.as_deref(), uploader_message.as_deref(),
-            &files, total, duration, &brand,
-        ).await;
-    });
+    // The uploader's own receipt of what arrived (issue #86) — verified addresses only, see above.
+    let receipt_to = verified_email.clone().filter(|_| first_completion && email_config.configured());
+    if first_completion {
+        let (email_config, brand, files, link_name, receipt_to) =
+            (email_config.clone(), brand.clone(), files.clone(), link_name.clone(), receipt_to.clone());
+        tokio::spawn(async move {
+            crate::notify::send_upload_completion(
+                &email_config, &link_name, uploader_name.as_deref(), uploader_email.as_deref(), uploader_message.as_deref(),
+                &files, total, duration, &brand,
+            ).await;
+            if let Some(to) = receipt_to {
+                crate::notify::send_upload_receipt(&email_config, &to, &link_name, &files, total, &brand).await;
+            }
+        });
+    }
     if !account.is_empty() && !folder.is_empty() && !file_ids.is_empty() {
         let db = state.db.clone();
         let mut redis = state.redis.clone();
         tokio::spawn(async move {
-            let created = crate::sync::events::trigger_sync_for_upload(&db, &account, &folder, &file_ids).await;
-            for job_id in created {
+            let to_run = crate::sync::events::trigger_sync_for_upload(&db, &account, &folder, &file_ids).await;
+            for job_id in to_run {
                 let _ = queue::enqueue(&mut redis, RUN_SYNC_JOB, &job_id.to_string(), 0.0).await;
             }
         });
     }
-    Json(json!({ "ok": true })).into_response()
+    let mut res = Json(json!({ "ok": true, "receipt_to": receipt_to })).into_response();
+    if let Some(email) = &verified_email {
+        // Slide the trust window on a real upload.
+        if let Ok(v) = axum::http::HeaderValue::from_str(&verify::trust_cookie(&state.settings, email)) {
+            res.headers_mut().append(axum::http::header::SET_COOKIE, v);
+        }
+    }
+    res
 }
 
 pub async fn session_heartbeat(
     State(state): State<AppState>,
     Path((token, session_id)): Path<(String, String)>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     body: Option<Json<Value>>,
 ) -> Response {
+    let mut redis = state.redis.clone();
+    if let Err(msg) = ratelimit::check(&mut redis, &state.settings, "default", &token, &headers, Some(peer)).await {
+        return detail_response(StatusCode::TOO_MANY_REQUESTS, &msg);
+    }
     let row = match link_row(&state, &token).await {
         Ok(r) => r,
         Err(r) => return r,
@@ -549,7 +623,13 @@ pub async fn session_heartbeat(
 pub async fn abandon_session(
     State(state): State<AppState>,
     Path((token, session_id)): Path<(String, String)>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
 ) -> Response {
+    let mut redis = state.redis.clone();
+    if let Err(msg) = ratelimit::check(&mut redis, &state.settings, "default", &token, &headers, Some(peer)).await {
+        return detail_response(StatusCode::TOO_MANY_REQUESTS, &msg);
+    }
     let row = match link_row(&state, &token).await {
         Ok(r) => r,
         Err(r) => return r,

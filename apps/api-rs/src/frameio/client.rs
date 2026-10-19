@@ -39,8 +39,16 @@ pub struct FrameioClient {
     db: PgPool,
     settings: Arc<Settings>,
     folder_cache: Mutex<HashMap<(String, String), String>>,
-    folder_meta_cache: Mutex<HashMap<String, (String, Option<String>)>>,
+    /// folder_id -> (name, parent_id, fetched_at) for ancestor walks (folder_relative_path,
+    /// folder_ancestry), so files sharing a subtree don't re-fetch each ancestor. Entries expire
+    /// after FOLDER_META_TTL: the sync engine decides from these walks whether a file is inside a
+    /// rule's folder, so a moved folder must be seen again.
+    folder_meta_cache: Mutex<HashMap<String, (String, Option<String>, std::time::Instant)>>,
 }
+
+/// How long a cached folder (name, parent) is trusted. Short enough that a folder moved into or
+/// out of a sync rule's folder is noticed within minutes; long enough to spare repeat calls.
+const FOLDER_META_TTL: Duration = Duration::from_secs(600);
 
 impl FrameioClient {
     pub fn new(db: PgPool, settings: Arc<Settings>) -> Self {
@@ -380,11 +388,18 @@ impl FrameioClient {
         })
     }
 
-    /// Walk up `parent_id` to the rule's root, returning the relative folder path ("" at root).
-    pub async fn folder_relative_path(&self, account_id: &str, parent_id: Option<&str>, root_folder_id: &str) -> Result<String, FrameioError> {
-        let Some(parent_id) = parent_id else { return Ok(String::new()) };
+    /// POSIX path of a file's folder *relative to* `root_folder_id` (root exclusive).
+    ///
+    /// Walks up from `parent_id` collecting folder names until it reaches the rule's root folder.
+    /// `Some("")` when the file sits directly in the root folder, and `None` when the walk never
+    /// reaches it — the file lives elsewhere in the project (a sibling folder, the project root),
+    /// so it is outside the rule's folder. Caps depth and de-dups visited ids to survive a cycle;
+    /// either also counts as "never reached". Folder metadata is cached for FOLDER_META_TTL, so a
+    /// just-moved folder can read stale until then; reconcile re-checks files it skipped as outside.
+    pub async fn folder_relative_path(&self, account_id: &str, parent_id: Option<&str>, root_folder_id: &str) -> Result<Option<String>, FrameioError> {
+        let Some(parent_id) = parent_id else { return Ok(Some(String::new())) };
         if parent_id == root_folder_id {
-            return Ok(String::new());
+            return Ok(Some(String::new()));
         }
         let mut segments: Vec<String> = Vec::new();
         let mut seen: Vec<String> = Vec::new();
@@ -399,8 +414,11 @@ impl FrameioClient {
             segments.push(name);
             current = next_parent;
         }
+        if current.as_deref() != Some(root_folder_id) {
+            return Ok(None);
+        }
         segments.reverse();
-        Ok(segments.join("/"))
+        Ok(Some(segments.join("/")))
     }
 
     /// Folder ancestry, top-most first, ending at `folder_id`.
@@ -427,14 +445,19 @@ impl FrameioClient {
         Ok(items)
     }
 
+    /// A folder's (name, parent_id), from the cache while the entry is fresh.
     async fn folder_meta(&self, account_id: &str, folder_id: &str) -> Result<(String, Option<String>), FrameioError> {
-        if let Some(cached) = self.folder_meta_cache.lock().await.get(folder_id).cloned() {
-            return Ok(cached);
+        if let Some((name, parent, fetched_at)) = self.folder_meta_cache.lock().await.get(folder_id).cloned() {
+            if fetched_at.elapsed() < FOLDER_META_TTL {
+                return Ok((name, parent));
+            }
         }
         let folder = self.get_folder(account_id, folder_id).await?;
-        let meta = (folder.name, folder.parent_id);
-        self.folder_meta_cache.lock().await.insert(folder_id.to_string(), meta.clone());
-        Ok(meta)
+        self.folder_meta_cache.lock().await.insert(
+            folder_id.to_string(),
+            (folder.name.clone(), folder.parent_id.clone(), std::time::Instant::now()),
+        );
+        Ok((folder.name, folder.parent_id))
     }
 
     /// Create a file placeholder + presigned chunk URLs.

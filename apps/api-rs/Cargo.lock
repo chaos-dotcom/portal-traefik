@@ -1797,7 +1797,6 @@ dependencies = [
  "bcrypt",
  "bytes",
  "chrono",
- "fastrand",
  "futures",
  "getrandom 0.4.3",
  "hex",

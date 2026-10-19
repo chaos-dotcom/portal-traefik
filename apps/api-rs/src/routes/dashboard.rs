@@ -317,6 +317,10 @@ pub async fn transfers(State(state): State<AppState>, _: Admin, Query(q): Query<
         "sync_health": {
             "waiting": counts.get("waiting").copied().unwrap_or(0),
             "running": counts.get("running").copied().unwrap_or(0),
+            // Queued to run (new, or between retries) but not started yet. Counted apart from
+            // "running" yet still in flight: leaving it out made a just-finished upload read as
+            // fully synced while its last files sat in the queue (issue #85).
+            "queued": counts.get("pending").copied().unwrap_or(0),
             "dead_letter": counts.get("dead_letter").copied().unwrap_or(0),
             "done_24h": done_24h,
             "dead_letter_rule_id": dead_letter_rule_id.map(|u| u.to_string()),

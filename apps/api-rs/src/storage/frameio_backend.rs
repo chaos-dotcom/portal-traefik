@@ -68,7 +68,7 @@ impl FrameioStorageBackend {
                 name: v.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string(),
                 size: v.get("file_size").and_then(|x| x.as_i64()),
                 media_type: v.get("media_type").and_then(|x| x.as_str()).map(|s| s.to_string()),
-                relative_dir: v.get("path").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                relative_dir: Some(v.get("path").and_then(|x| x.as_str()).unwrap_or("").to_string()),
                 ..Default::default()
             })
             .collect())
@@ -82,8 +82,7 @@ impl FrameioStorageBackend {
         let relative_dir = self
             .client
             .folder_relative_path(&account_id, parent_id.as_deref(), &root_folder_id)
-            .await
-            .unwrap_or_default();
+            .await?;
         Ok(RemoteFile {
             id: f.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
             name: f.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string(),

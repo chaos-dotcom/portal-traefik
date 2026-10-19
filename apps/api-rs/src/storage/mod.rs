@@ -26,7 +26,7 @@ impl DestinationConfig {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct RemoteFile {
     pub id: String,
     pub name: String,
@@ -34,8 +34,27 @@ pub struct RemoteFile {
     pub media_type: Option<String>,
     pub parent_id: Option<String>,
     pub project_id: Option<String>,
-    pub relative_dir: String,
+    /// POSIX path of the file's folder relative to the rule's root source folder (root exclusive),
+    /// e.g. "Dailies/Monday". Empty for files directly in the root. The sync engine prepends it to
+    /// the local path so the source's subfolder tree is mirrored onto the destination. `None` when
+    /// the file is not under the rule's root folder at all (it must not be synced).
+    pub relative_dir: Option<String>,
     pub status: Option<String>,
+}
+
+impl Default for RemoteFile {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            name: String::new(),
+            size: None,
+            media_type: None,
+            parent_id: None,
+            project_id: None,
+            relative_dir: Some(String::new()), // Python's default is "" (in the root), not None
+            status: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]

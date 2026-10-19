@@ -16,6 +16,7 @@ mod verify;
 mod sync;
 mod spa;
 mod pyfmt;
+mod request_log;
 mod state;
 
 use std::sync::Arc;
@@ -41,7 +42,9 @@ async fn main() -> anyhow::Result<()> {
 
     // `portal-api seed` — one-shot admin seed, run once by the container entrypoint.
     if std::env::args().nth(1).as_deref() == Some("seed") {
-        seed::seed_admin(&db).await?;
+        settings.require_secure_secrets()?; // fail before seeding an admin with the placeholder password
+        seed::seed_admin(&db, &settings).await?;
+        seed::seed_config(&db, &settings).await?;
         return Ok(());
     }
     let redis = redis::aio::ConnectionManager::new(
@@ -57,6 +60,7 @@ async fn main() -> anyhow::Result<()> {
         return sync::worker::run(state).await;
     }
 
+    settings.require_secure_secrets()?;
     let addr = format!("{}:{}", settings.host, settings.port);
     let settings = Arc::new(settings);
     let frameio = Arc::new(frameio::FrameioClient::new(db.clone(), settings.clone()));
@@ -161,7 +165,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/frameio/files/{file_id}/move", axum::routing::patch(routes::frameio::move_file))
         .route("/frameio/files/{file_id}/copy", post(routes::frameio::copy_file))
         .route("/frameio/shares", post(routes::frameio::create_share))
-        .fallback(error::not_found);
+        .fallback(error::not_found)
+        .layer(axum::middleware::from_fn(request_log::request_id_middleware));
 
     // SvelteKit's static build. Unknown non-API paths serve index.html for client-side routing.
     // NOTE: `not_found_service` would force a 404 status on the shell; `fallback` serves it 200.

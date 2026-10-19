@@ -96,11 +96,34 @@ pub struct LoginRequest {
     pub password: String,
 }
 
+#[derive(Deserialize)]
+pub struct TotpLoginRequest {
+    pub code: String,
+}
+
+/// The `strict` per-minute budget both login steps share with Python's `limit("strict")`.
+/// These routes carry no link token, so the key's token part is "-" (as in Python).
+async fn login_rate_limit(
+    state: &AppState,
+    headers: &axum::http::HeaderMap,
+    peer: std::net::SocketAddr,
+) -> Result<(), Response> {
+    let mut redis = state.redis.clone();
+    crate::lib::ratelimit::check(&mut redis, &state.settings, "strict", "-", headers, Some(peer))
+        .await
+        .map_err(|msg| detail(StatusCode::TOO_MANY_REQUESTS, &msg))
+}
+
 pub async fn login(
     State(state): State<AppState>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    headers: axum::http::HeaderMap,
     SessionExt(session): SessionExt,
     axum::extract::Json(body): axum::extract::Json<LoginRequest>,
 ) -> Response {
+    if let Err(r) = login_rate_limit(&state, &headers, peer).await {
+        return r;
+    }
     let row = sqlx::query_as::<_, (Uuid, String, bool, bool)>(
         "SELECT id, password_hash, is_active, totp_enabled FROM users WHERE email = $1",
     )
@@ -160,9 +183,14 @@ fn clear_totp_pending(session: &SessionHandle) {
 /// `POST /api/auth/login/totp` — the second factor after a password step.
 pub async fn login_totp(
     State(state): State<AppState>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    headers: axum::http::HeaderMap,
     SessionExt(session): SessionExt,
-    axum::extract::Json(body): axum::extract::Json<LoginRequest>,
+    axum::extract::Json(body): axum::extract::Json<TotpLoginRequest>,
 ) -> Response {
+    if let Err(r) = login_rate_limit(&state, &headers, peer).await {
+        return r;
+    }
     let (uid, ts) = {
         let mut s = session.lock().unwrap();
         (
@@ -207,7 +235,7 @@ pub async fn login_totp(
     let secret = crate::crypto::TokenCipher::new(&state.settings.token_encryption_key)
         .decrypt(secret_enc.as_deref().unwrap_or(""))
         .unwrap_or_default();
-    let code = body.password.clone();
+    let code = body.code.clone();
     let mut ok = crate::auth::totp::verify_code(&secret, &code);
     if !ok {
         let hashes: Vec<String> = recovery

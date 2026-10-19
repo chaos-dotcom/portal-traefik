@@ -24,7 +24,8 @@ pub struct UploadedFile {
 }
 
 fn escape(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+    // Same set as Python's html.escape(quote=True).
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;").replace('\'', "&#x27;")
 }
 
 fn html_shell(brand: &EmailBrand, heading: &str, body_html: &str) -> String {
@@ -81,34 +82,46 @@ fn format_duration(seconds: f64) -> String {
     format!("{hours}h {minutes}m")
 }
 
+/// Every caller sends to exactly one person; never let an address list fan a message out.
+fn single_recipient(to: &str) -> bool {
+    to.parse::<lettre::message::Mailboxes>().map(|m| m.into_iter().count()).unwrap_or(1) == 1
+}
+
 pub async fn send_email(config: &EmailConfig, to: &str, subject: &str, text: &str, html: Option<&str>) -> Result<(), EmailError> {
     if !config.configured() {
         return Err(EmailError("Email is not configured".into()));
     }
+    if !single_recipient(to) {
+        return Err(EmailError("Refusing to send to more than one recipient".into()));
+    }
     let from = config.smtp_from.parse().map_err(|_| EmailError("bad from address".into()))?;
     let to_addr = to.parse().map_err(|_| EmailError("bad to address".into()))?;
-    let body = match html {
-        Some(h) => MultiPart::alternative_plain_html(text.to_string(), h.to_string()),
-        None => MultiPart::alternative_plain_html(text.to_string(), text.to_string()),
-    };
-    let email = Message::builder()
-        .from(from)
-        .to(to_addr)
-        .subject(subject)
-        .multipart(body)
-        .map_err(|e| EmailError(e.to_string()))?;
+    let builder = Message::builder().from(from).to(to_addr).subject(subject);
+    let email = match html {
+        Some(h) => builder.multipart(MultiPart::alternative_plain_html(text.to_string(), h.to_string())),
+        None => builder.singlepart(lettre::message::SinglePart::plain(text.to_string())),
+    }
+    .map_err(|e| EmailError(e.to_string()))?;
 
+    // Implicit TLS, else STARTTLS when enabled, else plain SMTP (a local relay) — as Python's
+    // aiosmtplib.send(use_tls=..., start_tls=...).
     let base = if config.smtp_use_tls {
         AsyncSmtpTransport::<Tokio1Executor>::relay(&config.smtp_host)
-    } else {
+    } else if config.smtp_starttls {
         AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&config.smtp_host)
+    } else {
+        Ok(AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(&config.smtp_host))
     }
     .map_err(|e| EmailError(e.to_string()))?;
     let mut transport = base.port(config.smtp_port);
     if !config.smtp_username.is_empty() {
         transport = transport.credentials(Credentials::new(config.smtp_username.clone(), config.smtp_password.clone()));
     }
-    transport.build().send(email).await.map_err(|e| EmailError(format!("Could not send email: {e}")))?;
+    if let Err(e) = transport.build().send(email).await {
+        tracing::warn!("notify.email.send_failed to={to} error={e}");
+        return Err(EmailError("Could not send email".into()));
+    }
+    tracing::info!("notify.email.sent to={to} subject={subject}");
     Ok(())
 }
 
@@ -134,6 +147,28 @@ fn meta_row(label: &str, value: &str) -> String {
     )
 }
 
+fn file_size_label(f: &UploadedFile) -> String {
+    f.size.map(format_bytes).unwrap_or_else(|| "—".to_string())
+}
+
+fn file_lines(files: &[UploadedFile]) -> Vec<String> {
+    files.iter().map(|f| format!("  • {}  ({})", f.name, file_size_label(f))).collect()
+}
+
+fn file_list_html(files: &[UploadedFile]) -> String {
+    let rows: String = files
+        .iter()
+        .map(|f| {
+            format!(
+                "<li style=\"margin:2px 0\"><span style=\"color:#18181b\">{}</span> <span style=\"color:#a1a1aa\">({})</span></li>",
+                escape(&f.name),
+                escape(&file_size_label(f))
+            )
+        })
+        .collect();
+    format!("<ul style=\"margin:0 0 16px;padding-left:18px\">{rows}</ul>")
+}
+
 pub fn render_upload_completion(
     link_name: &str, uploader_name: Option<&str>, uploader_email: Option<&str>, uploader_message: Option<&str>,
     files: &[UploadedFile], total_bytes: i64, duration_seconds: f64, brand: &EmailBrand,
@@ -149,28 +184,22 @@ pub fn render_upload_completion(
         format!("Message:          {}", dash(uploader_message)),
         String::new(), format!("Files ({count}):"),
     ];
-    for f in files {
-        let size = f.size.map(format_bytes).unwrap_or_else(|| "—".to_string());
-        lines.push(format!("  • {}  ({size})", f.name));
-    }
+    lines.extend(file_lines(files));
     lines.push(String::new());
     lines.push(format!("Total:    {}", format_bytes(total_bytes)));
     lines.push(format!("Duration: {}", format_duration(duration_seconds)));
     let text = lines.join("\n");
 
-    let file_rows: String = files.iter().map(|f| {
-        let size = f.size.map(format_bytes).unwrap_or_else(|| "—".to_string());
-        format!("<li style=\"margin:2px 0\"><span style=\"color:#18181b\">{}</span> <span style=\"color:#a1a1aa\">({})</span></li>", escape(&f.name), escape(&size))
-    }).collect();
     let body_html = format!(
         "<p style=\"margin:0 0 16px\">A new upload completed on <strong>{}</strong>.</p>\
 <table role=\"presentation\" style=\"border-collapse:collapse;margin:0 0 16px;width:100%\">{}{}{}</table>\
 <p style=\"margin:0 0 4px;font-weight:600;color:#18181b\">Files ({count})</p>\
-<ul style=\"margin:0 0 16px;padding-left:18px\">{file_rows}</ul>\
+{file_list}\
 <table role=\"presentation\" style=\"border-collapse:collapse;width:100%\">{}{}</table>",
         escape(link_name), meta_row("Uploader", &dash(uploader_name)), meta_row("Email", &dash(uploader_email)),
         meta_row("Message", &dash(uploader_message)), meta_row("Total", &format_bytes(total_bytes)),
         meta_row("Duration", &format_duration(duration_seconds)),
+        file_list = file_list_html(files),
     );
     let html = html_shell(brand, "Upload complete", &body_html);
     (subject, text, html)
@@ -185,9 +214,83 @@ pub async fn send_upload_completion(
     let _ = send_email(config, &config.resolved_notify_email(), &subject, &text, Some(&html)).await;
 }
 
+/// The (subject, text, html) of the uploader's delivery receipt (issue #86): the list of files
+/// that arrived, for them to keep. Carries nothing the uploader didn't send.
+pub fn render_upload_receipt(link_name: &str, files: &[UploadedFile], total_bytes: i64, brand: &EmailBrand) -> (String, String, String) {
+    let count = files.len();
+    let noun = format!("{count} file{}", if count != 1 { "s" } else { "" });
+    let subject = format!("Delivered to {link_name}: {noun}");
+    let mut lines = vec![
+        format!("Your upload to \"{link_name}\" is complete. These files were delivered:"),
+        String::new(),
+    ];
+    lines.extend(file_lines(files));
+    lines.push(String::new());
+    lines.push(format!("Total: {noun}, {}", format_bytes(total_bytes)));
+    let text = lines.join("\n");
+    let body_html = format!(
+        "<p style=\"margin:0 0 16px\">Your upload to <strong>{}</strong> is complete. These files were delivered:</p>\
+{}<table role=\"presentation\" style=\"border-collapse:collapse;width:100%\">{}</table>",
+        escape(link_name),
+        file_list_html(files),
+        meta_row("Total", &format!("{noun}, {}", format_bytes(total_bytes))),
+    );
+    let html = html_shell(brand, "Upload complete", &body_html);
+    (subject, text, html)
+}
+
+/// Email the uploader their delivery receipt (best-effort). Only ever to an address the uploader
+/// proved they own — checking that is the caller's job (see `routes::public::complete_session`);
+/// mailing typed-in addresses would let anyone make Portal send mail to any inbox.
+pub async fn send_upload_receipt(config: &EmailConfig, to: &str, link_name: &str, files: &[UploadedFile], total_bytes: i64, brand: &EmailBrand) {
+    if !config.configured() {
+        return;
+    }
+    let (subject, text, html) = render_upload_receipt(link_name, files, total_bytes, brand);
+    let _ = send_email(config, to, &subject, &text, Some(&html)).await; // already logged
+}
+
 pub async fn send_test_email(config: &EmailConfig, brand: &EmailBrand) -> Result<(), EmailError> {
     let text = "This is a test email from Portal. If you received it, SMTP is configured correctly.";
     let body_html = "<p style=\"margin:0\">This is a test email from Portal. If you received it, SMTP is configured correctly.</p>";
     let html = html_shell(brand, "Test email", body_html);
     send_email(config, &config.resolved_notify_email(), "Portal test email", text, Some(&html)).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn brand() -> EmailBrand {
+        EmailBrand { name: "Acme Post".into(), accent_color: "#ff8800".into(), logo_url: None }
+    }
+
+    #[test]
+    fn refuses_address_lists() {
+        assert!(single_recipient("client@example.com"));
+        assert!(!single_recipient("client@example.com, eve@example.com"));
+        assert!(!single_recipient("a@example.com,b@example.com"));
+    }
+
+    #[test]
+    fn receipt_lists_the_delivered_files() {
+        let files = vec![
+            UploadedFile { name: "A001.mov".into(), size: Some(2048) },
+            UploadedFile { name: "<b>.wav".into(), size: None },
+        ];
+        let (subject, text, html) = render_upload_receipt("Acme Deliveries", &files, 2048, &brand());
+        assert_eq!(subject, "Delivered to Acme Deliveries: 2 files");
+        assert!(text.starts_with("Your upload to \"Acme Deliveries\" is complete. These files were delivered:"));
+        assert!(text.contains("  • A001.mov  (2.0 KB)"));
+        assert!(text.contains("  • <b>.wav  (—)"));
+        assert!(text.ends_with("Total: 2 files, 2.0 KB"));
+        assert!(html.contains("&lt;b&gt;.wav")); // file names are escaped in the HTML part
+        let (one, _, _) = render_upload_receipt("X", &files[..1], 1, &brand());
+        assert_eq!(one, "Delivered to X: 1 file");
+    }
+
+    #[test]
+    fn escapes_like_python_html_escape() {
+        assert_eq!(escape("<a href=\"x\">Tom's & co</a>"), "&lt;a href=&quot;x&quot;&gt;Tom&#x27;s &amp; co&lt;/a&gt;");
+    }
 }

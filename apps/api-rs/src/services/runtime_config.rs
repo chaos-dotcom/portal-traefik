@@ -80,6 +80,7 @@ pub fn encrypt_secret(settings: &Settings, plaintext: &str) -> String {
 }
 
 /// Branding for outgoing emails (name/accent/logo).
+#[derive(Clone)]
 pub struct EmailBrand {
     pub name: String,
     pub accent_color: String,

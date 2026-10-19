@@ -30,17 +30,33 @@ fn hash_code(code: &str) -> String {
     hex::encode(Sha256::digest(code.trim().as_bytes()))
 }
 
+// One plain address. Besides "@" and whitespace, refuse the characters that make an address list,
+// a display name or a quoted part ("a,b@x.com", "Eve <e@x.com>"): mail would go to every recipient
+// in it while the code proves control of only one. The domain is matched label by label (labels
+// can't contain dots). Rust's regex engine is linear-time, so crafted input can't make it backtrack.
+const NOT_SPECIAL: &str = r#"[^@\s,;:<>()\[\]"\\"#;
+const MAX_EMAIL_LENGTH: usize = 254; // RFC 5321's limit for a deliverable address
+
+fn email_re() -> &'static regex::Regex {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    RE.get_or_init(|| {
+        regex::Regex::new(&format!(
+            "^{NOT_SPECIAL}]+@{NOT_SPECIAL}.]+(?:\\.{NOT_SPECIAL}.]+)+$"
+        ))
+        .expect("email regex")
+    })
+}
+
+/// Port of `portal.verify.email_check.valid_syntax`.
+pub fn valid_syntax(email: &str) -> bool {
+    let email = email.trim();
+    email.chars().count() <= MAX_EMAIL_LENGTH && email_re().is_match(email)
+}
+
 /// Syntax + (optionally) a DNS A/AAAA plausibility check; DNS errors fail open.
 pub async fn is_plausible_email(email: &str, check_mx: bool) -> bool {
     let email = email.trim();
-    let ok_syntax = {
-        let parts: Vec<&str> = email.split('@').collect();
-        parts.len() == 2
-            && !parts[0].is_empty()
-            && parts[1].contains('.')
-            && !parts[1].starts_with('.')
-            && !parts[1].ends_with('.')
-    };
+    let ok_syntax = valid_syntax(email);
     if !ok_syntax {
         return false;
     }
@@ -82,7 +98,7 @@ pub async fn request_code(db: &PgPool, settings: &Settings, email: &str) -> Resu
             return Err(VerificationError { status: 429, detail: "Please wait a moment before requesting another code".into() });
         }
     }
-    let code = format!("{:06}", fastrand::u32(0..1_000_000));
+    let code = format!("{:06}", random_below(1_000_000));
     let expires = now + Duration::seconds(settings.verify_code_ttl_seconds);
     let brand = email_brand(db, settings).await;
     // Send first; only persist if the email actually went out.
@@ -110,26 +126,44 @@ pub async fn request_code(db: &PgPool, settings: &Settings, email: &str) -> Resu
 /// True iff `code` matches the active, unexpired code for `email` (consumed on success).
 pub async fn verify_code(db: &PgPool, settings: &Settings, email: &str, code: &str) -> bool {
     let email = norm(email);
-    let row = sqlx::query("SELECT id, code_hash, expires_at, attempts FROM email_verifications WHERE email = $1")
-        .bind(&email)
-        .fetch_optional(db)
-        .await
-        .ok()
-        .flatten();
-    let Some(row) = row else { return false };
-    let now = Utc::now();
-    let expires: chrono::DateTime<Utc> = row.get("expires_at");
-    let attempts: i32 = row.get("attempts");
-    if expires < now || attempts >= settings.verify_max_attempts {
-        return false;
-    }
-    let _ = sqlx::query("UPDATE email_verifications SET attempts = attempts + 1 WHERE email = $1")
-        .bind(&email).execute(db).await;
-    if row.get::<String, _>("code_hash") == hash_code(code) {
+    // Spend one attempt atomically, and only on a live code under the attempt cap, so parallel
+    // guesses can't slip past the limit between the check and the increment.
+    let stored: Option<String> = sqlx::query_scalar(
+        "UPDATE email_verifications SET attempts = attempts + 1
+          WHERE email = $1 AND expires_at >= now() AND attempts < $2
+      RETURNING code_hash",
+    )
+    .bind(&email)
+    .bind(settings.verify_max_attempts)
+    .fetch_optional(db)
+    .await
+    .ok()
+    .flatten();
+    let Some(stored) = stored else { return false };
+    if constant_time_eq(stored.as_bytes(), hash_code(code).as_bytes()) {
         let _ = sqlx::query("DELETE FROM email_verifications WHERE email = $1").bind(&email).execute(db).await;
+        tracing::info!("verify.code_ok email={email}");
         return true;
     }
     false
+}
+
+/// A uniform integer in `0..bound` from the OS CSPRNG (Python: `secrets.randbelow`). Rejection
+/// sampling keeps it unbiased.
+fn random_below(bound: u32) -> u32 {
+    let zone = u32::MAX - (u32::MAX % bound);
+    loop {
+        let mut buf = [0u8; 4];
+        getrandom::fill(&mut buf).expect("os random");
+        let v = u32::from_le_bytes(buf);
+        if v < zone {
+            return v % bound;
+        }
+    }
+}
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 fn cipher(settings: &Settings) -> TokenCipher {
@@ -159,4 +193,50 @@ pub fn trust_cookie(settings: &Settings, email: &str) -> String {
         flags.push_str("; secure");
     }
     format!("{TRUST_COOKIE}={token}; Max-Age={}; path=/; {flags}", days * 86400)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Same cases as apps/api/tests/test_verify.py::test_valid_syntax.
+    #[test]
+    fn syntax_accepts_one_plain_address_only() {
+        assert!(valid_syntax("a@b.co"));
+        assert!(valid_syntax("ze.maria+x@sub.domain.com"));
+        assert!(valid_syntax("  padded@example.com  "));
+        assert!(!valid_syntax("ze@"));
+        assert!(!valid_syntax("ze@ze")); // no dot in domain
+        assert!(!valid_syntax("no-at-sign"));
+        assert!(!valid_syntax("postmaster,me@evil.com"));
+        assert!(!valid_syntax("a@x.com;b@y.com"));
+        assert!(!valid_syntax("Eve <eve@evil.com>"));
+        assert!(!valid_syntax("\"q\"@x.com"));
+        assert!(!valid_syntax("a@b..com")); // empty domain label
+        assert!(!valid_syntax("a b@x.com"));
+        assert!(!valid_syntax(&format!("{}@b.co", "a".repeat(250)))); // over the 254-char limit
+    }
+
+    #[test]
+    fn syntax_check_is_linear_on_crafted_input() {
+        let evil = format!("!@!.{}@", "!.".repeat(6000));
+        let started = std::time::Instant::now();
+        assert!(!email_re().is_match(&evil));
+        assert!(started.elapsed() < std::time::Duration::from_millis(100));
+    }
+
+    #[test]
+    fn codes_are_six_digits_in_range() {
+        for _ in 0..1000 {
+            assert!(random_below(1_000_000) < 1_000_000);
+        }
+        assert_eq!(format!("{:06}", 42), "000042");
+    }
+
+    #[test]
+    fn constant_time_eq_compares_whole_values() {
+        assert!(constant_time_eq(b"abc", b"abc"));
+        assert!(!constant_time_eq(b"abc", b"abd"));
+        assert!(!constant_time_eq(b"abc", b"ab"));
+    }
 }

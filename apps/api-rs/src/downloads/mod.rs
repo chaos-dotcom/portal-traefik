@@ -1,7 +1,7 @@
 
 //! Download-link helpers — port of `portal.downloads.links`.
 
-use futures::stream::{FuturesUnordered, StreamExt};
+use futures::stream::StreamExt;
 
 use crate::frameio::{FrameioClient, FrameioError};
 
@@ -54,23 +54,20 @@ pub async fn resolve_source(client: &FrameioClient, source: &serde_json::Value) 
                 .and_then(|v| v.as_array())
                 .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
                 .unwrap_or_default();
-            let mut futs = FuturesUnordered::new();
-            for fid in ids {
-                let account = account_id.clone();
-                futs.push(async move { (fid.clone(), client.get_file(&account, &fid).await) });
-            }
-            let mut results: Vec<(String, Result<serde_json::Value, FrameioError>)> = Vec::new();
-            // Bounded concurrency: drain in windows of SELECTION_CONCURRENCY.
-            let _ = SELECTION_CONCURRENCY;
-            while let Some(r) = futs.next().await {
-                results.push(r);
-            }
-            let mut out = Vec::new();
-            // Preserve input order.
-            for (want, _) in source.get("file_ids").and_then(|v| v.as_array()).map(|a| a.iter().enumerate().map(|(i, v)| (v.as_str().unwrap_or("").to_string(), i)).collect::<Vec<_>>()).unwrap_or_default() {
-                if let Some((_, v)) = results.iter().find(|(id, _)| id == &want) {
-                    out.push(file_from_value(v.as_ref().map_err(|e| FrameioError::Other(format!("{e:?}")))?));
-                }
+            // At most SELECTION_CONCURRENCY lookups in flight; `buffered` yields results in input
+            // order, so the listing matches the curated selection order (Python: a semaphore +
+            // gather). The first failure propagates as-is.
+            let fetched: Vec<Result<serde_json::Value, FrameioError>> = futures::stream::iter(ids)
+                .map(|fid| {
+                    let account = account_id.clone();
+                    async move { client.get_file(&account, &fid).await }
+                })
+                .buffered(SELECTION_CONCURRENCY)
+                .collect()
+                .await;
+            let mut out = Vec::with_capacity(fetched.len());
+            for f in fetched {
+                out.push(file_from_value(&f?));
             }
             out
         }
