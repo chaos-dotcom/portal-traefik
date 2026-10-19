@@ -32,17 +32,41 @@ COPY apps/api-rs/schema.sql ./schema.sql
 COPY apps/api-rs/migrations ./migrations
 RUN touch src/main.rs && cargo build --release --locked --bin portal-api
 
+# ---- caddy ---------------------------------------------------------------------------------------
+# Built from source rather than copied from the caddy image: that image's binary is compiled with
+# whatever Go was current at release and so trails Go's security releases (image scans flag its
+# stdlib). Same release and the standard module set, compiled with a patched Go.
+FROM golang:1.26-trixie AS caddy-build
+ARG CADDY_VERSION=v2.11.7
+# Security releases of Caddy's dependencies that postdate CADDY_VERSION (drop each pin once a Caddy
+# release requires that version itself; the version check below catches a pin that would
+# downgrade Caddy).
+ARG CADDY_DEP_PINS="golang.org/x/net@v0.60.0"
+WORKDIR /caddy
+# The main package xcaddy generates — Caddy's command plus its standard modules — so the binary
+# reports its version and resolves dependencies as a release build does (plus the pins above).
+RUN printf 'package main\n\nimport (\n\tcaddycmd "github.com/caddyserver/caddy/v2/cmd"\n\t_ "github.com/caddyserver/caddy/v2/modules/standard"\n)\n\nfunc main() { caddycmd.Main() }\n' > main.go \
+    && go mod init caddy \
+    && go get github.com/caddyserver/caddy/v2@${CADDY_VERSION} ${CADDY_DEP_PINS} \
+    && go mod tidy \
+    && test "$(go list -m -f '{{.Version}}' github.com/caddyserver/caddy/v2)" = "${CADDY_VERSION}" \
+    && CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /usr/local/bin/caddy .
+
 # ---- final image -------------------------------------------------------------------------------
 FROM debian:trixie-slim AS final
 
 RUN set -eux; \
     apt-get update; \
+    apt-get upgrade -y; \
     apt-get install -y --no-install-recommends \
         ca-certificates curl gnupg lsb-release postgresql-common redis-server redis-tools supervisor; \
     /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y; \
     apt-get install -y --no-install-recommends postgresql-16; \
+    # ssl-cert's placeholder key pair: Postgres here runs its own cluster with SSL off (loopback
+    # only), so nothing uses it — and a private key in the image is a finding for every scan.
+    rm -f /etc/ssl/private/ssl-cert-snakeoil.key /etc/ssl/certs/ssl-cert-snakeoil.pem; \
     rm -rf /var/lib/apt/lists/*
-COPY --from=caddy:2 /usr/bin/caddy /usr/bin/caddy
+COPY --from=caddy-build /usr/local/bin/caddy /usr/bin/caddy
 
 ENV PATH="/usr/lib/postgresql/16/bin:$PATH" \
     DATABASE_URL="postgresql://portal@127.0.0.1:5432/portal" \

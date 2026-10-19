@@ -31,7 +31,8 @@ Monorepo, shipped as **one all-in-one container** (`farbhaus/portal`):
 - `apps/web/` — SvelteKit frontend, built with `adapter-static` (`ssr = false`) into static files
   the Rust service serves; every load is a same-origin `fetch("/api/…")`. `src/routes/` includes
   `d/` (download), `u/` (upload), `login/`, `(admin)/`; `src/lib/` shared + `src/lib/components`.
-- Container plumbing: `Dockerfile` (multi-stage: web build → Rust build → Debian runtime),
+- Container plumbing: `Dockerfile` (multi-stage: web build → Rust build → Caddy built from source
+  with a patched Go, pinned by `CADDY_VERSION` / `CADDY_DEP_PINS` → Debian runtime),
   `docker/container/` (Caddyfile, supervisord.conf, entrypoint + start scripts),
   `docker-compose.yml` (+ `docker/docker-compose.dev.yml` overlay).
 
