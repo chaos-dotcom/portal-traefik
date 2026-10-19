@@ -44,7 +44,7 @@ chmod 700 "$SECRETS"
 # signable and stored Frame.io/SMTP tokens decryptable across restarts without the deployer
 # having to manage these by hand. TOKEN_ENCRYPTION_KEY in particular must stay stable, which it
 # does because it co-lives with the database it encrypts under /data.
-gen() { python -c "import secrets; print(secrets.token_urlsafe(32))"; }
+gen() { head -c 32 /dev/urandom | base64 | tr "+/" "-_" | tr -d "="; }
 for name in SESSION_SECRET TOKEN_ENCRYPTION_KEY; do
 	file="$SECRETS/$name"
 	cur=$(eval "printf '%s' \"\${$name:-}\"")
@@ -60,10 +60,10 @@ for name in SESSION_SECRET TOKEN_ENCRYPTION_KEY; do
 	chmod 600 "$file"
 done
 
-# --- Postgres init + migrations + seed --------------------------------------------------------
+# --- Postgres init + schema + seed ------------------------------------------------------------
 # Local + 127.0.0.1 connections use trust auth: the cluster is reachable only from inside this
 # container (Postgres binds loopback and the container publishes only :80), so no password is
-# needed. We run schema migrations and the admin seed HERE, against a temporary Postgres, before
+# needed. We migrate the schema and run the admin seed HERE, against a temporary Postgres, before
 # starting supervisord — so the supervised api and worker never race an unmigrated schema.
 if [ ! -s "$PGDATA/PG_VERSION" ]; then
 	echo "[entrypoint] initializing PostgreSQL data directory"
@@ -78,8 +78,15 @@ if ! su -s /bin/sh postgres -c "psql -h 127.0.0.1 -U postgres -d postgres -tAc \
 		-c \"CREATE ROLE portal LOGIN;\" -c \"CREATE DATABASE portal OWNER portal;\""
 fi
 
-echo "[entrypoint] applying migrations + seeding admin"
-( cd /app && alembic upgrade head && python -m portal.seed )
+echo "[entrypoint] migrating schema + seeding admin"
+# portal-api migrate creates the schema on first boot and upgrades an older one; it refuses a
+# database at a revision it has no path from (see apps/api-rs/migrations/README.md).
+if ! ( cd /app && portal-api migrate ); then
+	echo "[entrypoint] FATAL: schema migration failed (see above); not starting." >&2
+	su -s /bin/sh postgres -c "pg_ctl -D '$PGDATA' -w stop"
+	exit 1
+fi
+( cd /app && portal-api seed )
 
 su -s /bin/sh postgres -c "pg_ctl -D '$PGDATA' -w stop"
 

@@ -13,17 +13,28 @@ Portal handles auth, branding, links, and orchestration — never gigabytes.
 
 Monorepo, shipped as **one all-in-one container** (`farbhaus/portal`):
 
-- `apps/api/` — FastAPI backend (Python 3.12+, `uv`, async SQLAlchemy + Postgres, Redis/arq for the
-  sync worker queue, Alembic migrations under `apps/api/alembic/`). Source in `apps/api/src/portal/`:
-  - `routes/` HTTP endpoints · `auth/` admin login (passkeys/WebAuthn, TOTP, sessions) ·
-    `frameio/` Frame.io client + OAuth/connection · `storage/` backend-agnostic storage interface ·
-    `uploads/` + `downloads/` link engines · `sync/` watch-folder sync engine + worker ·
-    `verify/` email verification · `notify/` email · `services/` · `db/` models · `lib/` config,
-    crypto, rate-limit · `seed.py` first-boot admin seed · `main.py` app factory.
-- `apps/web/` — SvelteKit frontend (Node 22). `src/routes/` includes `d/` (download), `u/` (upload),
-  `login/`, `(admin)/`; `src/lib/` shared + `src/lib/components`.
-- Container plumbing: `Dockerfile` (multi-stage), `docker/container/` (Caddyfile, supervisord.conf,
-  entrypoint + start scripts), `docker-compose.yml` (+ `docker/docker-compose.dev.yml` overlay).
+- `apps/api-rs/` — **the Portal service** (Rust 1.98, axum + sqlx/Postgres + redis). One binary,
+  `portal-api`: the HTTP API plus the static web app on one origin; `portal-api worker` is the
+  sync worker (a Redis delayed queue), `portal-api migrate` / `seed` run from the entrypoint.
+  Source in `apps/api-rs/src/`:
+  - `routes/` HTTP endpoints · `auth.rs` + `auth/` admin login (passkeys/WebAuthn, TOTP) ·
+    `session.rs` Starlette-compatible signed session cookies · `frameio/` Frame.io client +
+    OAuth/connection · `storage/` backend-agnostic storage interface · `downloads/` download-link
+    sources · `sync/` watch-folder sync engine + worker + queue · `verify/` email verification ·
+    `notify/` email · `services/` · `common/` client IP, lockout, rate limit · `crypto.rs` ·
+    `config.rs` (same env vars as the Python settings) · `spa.rs` SPA shell, admin page gate,
+    branded `/u` `/d` shells · `migrate.rs` + `schema.sql` + `migrations/` the schema · `seed.rs`.
+- `apps/api/` — the **Python (FastAPI) reference implementation**, not shipped. It still owns the
+  Alembic migrations (`apps/api/alembic/`) the schema is authored with, and its pytest suite is the
+  behavioural spec the Rust service was ported from. `tools/rustify/` diffs the two services
+  byte for byte (`capture.py`/`diff.py`, `authdiff.py`, `interop.py`) and holds `schema_check.sh`.
+- `apps/web/` — SvelteKit frontend, built with `adapter-static` (`ssr = false`) into static files
+  the Rust service serves; every load is a same-origin `fetch("/api/…")`. `src/routes/` includes
+  `d/` (download), `u/` (upload), `login/`, `(admin)/`; `src/lib/` shared + `src/lib/components`.
+- Container plumbing: `Dockerfile` (multi-stage: web build → Rust build → Caddy built from source
+  with a patched Go, pinned by `CADDY_VERSION` / `CADDY_DEP_PINS` → Debian runtime),
+  `docker/container/` (Caddyfile, supervisord.conf, entrypoint + start scripts),
+  `docker-compose.yml` (+ `docker/docker-compose.dev.yml` overlay).
 
 All container state lives in the **`portal_data` volume** (`/data`): the Postgres cluster, Redis
 AOF, Caddy's certs/config (`/data/caddy`), and generated secrets (`/data/secrets`).
@@ -32,9 +43,14 @@ AOF, Caddy's certs/config (`/data/caddy`), and generated secrets (`/data/secrets
 
 - `make dev` — build the all-in-one image from source and run it (dev overlay).
 - `make build` — build `farbhaus/portal:dev` locally.
-- `make check` — static checks: `cd apps/api && uv run ruff check && uv run mypy src`; `cd apps/web
-  && npm run check`.
-- `make test` — backend pytest against throwaway Postgres/Redis containers.
+- `make check` — static checks: `cargo clippy --locked --all-targets -- -D warnings` (apps/api-rs);
+  `npm run check` (apps/web); `ruff` + `mypy` (apps/api).
+- `make test` — `cargo test --locked`, `tools/rustify/schema_check.sh`, and the Python pytest suite
+  against throwaway Postgres/Redis containers.
+
+**Schema changes:** write the Alembic migration in `apps/api`, then ship it to the Rust image as
+SQL — see `apps/api-rs/migrations/README.md` (generate with `alembic upgrade A:B --sql`, register
+in `src/migrate.rs`, `tools/rustify/schema_check.sh --write`). CI fails on drift.
 - `make deploy` / `make update` / `make logs` / `make status` / `make backup` / `make shell`.
 
 ## Deployment (two modes, one knob)
@@ -68,18 +84,21 @@ backends slot in without touching the upload/sync engines:
 
 ```
 routes / upload engine / sync engine
-   └─ StorageBackend            (portal.storage.base)         backend-agnostic interface
-        └─ FrameioStorageBackend (portal.storage.frameio_backend)
-             └─ FrameioClient    (portal.frameio.client)      the one Frame.io client module
-                  └─ frameio SDK  (official V4 async `AsyncFrameio`)
+   └─ storage value objects       (apps/api-rs/src/storage/mod.rs)        backend-agnostic seam
+        └─ FrameioStorageBackend  (src/storage/frameio_backend.rs)
+             └─ FrameioClient     (src/frameio/client.rs)   the one Frame.io client module
+                  └─ Frame.io V4 REST via reqwest (the endpoints the Python SDK calls)
 ```
 
-- Everything Frame.io goes through `FrameioClient`: auth-aware (transparent token refresh; raises
-  `FrameioNotConnected`), retry/rate-limit-aware (honors `429`/`Retry-After`), logs every call
-  (`frameio.api.call`), one process-wide `httpx.AsyncClient`. SDK errors are translated to
+(The Python reference has the same layering: `portal.storage.base` →
+`portal.storage.frameio_backend` → `portal.frameio.client` → the official `AsyncFrameio` SDK.)
+
+- Everything Frame.io goes through `FrameioClient`: auth-aware (transparent token refresh;
+  `FrameioError::NotConnected`), retry/rate-limit-aware (honors `429`/`Retry-After`, retries 5xx),
+  one process-wide HTTP client, folder-metadata cache with a 10-minute TTL. Errors are
   `FrameioError` — Frame.io internals never leak upward.
-- `StorageBackend` value objects (`DestinationConfig`, `RemoteFile`, `UploadSession`,
-  `UploadCredentials`, `DownloadURL`, …) are the seam. `DestinationConfig` mirrors the type-tagged
+- Storage value objects (`DestinationConfig`, `RemoteFile`, `UploadSession`, `UploadCredentials`,
+  `DownloadURL`, …) are the seam. `DestinationConfig` mirrors the type-tagged
   `destinations.config` JSONB (`{"type":"frameio","account_id","workspace_id","project_id","folder_id"}`).
 - Pickers (admin-only, under `/api/frameio`): list accounts/workspaces/projects/folders/files;
   cursor pagination via `links.next` → `after`, capped at `PICKER_MAX_ITEMS`.
@@ -89,7 +108,8 @@ routes / upload engine / sync engine
 Frame.io V4 authenticates via **Adobe IMS**, OAuth 2.0 **authorization-code (Web App) flow**. The
 Frame.io **client ID/secret are entered in Portal's Settings page and stored encrypted in the DB**
 (not in `.env`); the *Adobe Developer Console setup* section in `README.md` covers obtaining them.
-Endpoints/behavior live in `apps/api/src/portal/frameio/oauth.py`.
+Endpoints/behavior live in `apps/api-rs/src/frameio/oauth.rs` (Python reference:
+`apps/api/src/portal/frameio/oauth.py`).
 
 - Authorize `https://ims-na1.adobelogin.com/ims/authorize/v2` · Token/refresh
   `https://ims-na1.adobelogin.com/ims/token/v3` (HTTP Basic `base64(client_id:client_secret)`) ·
@@ -98,7 +118,8 @@ Endpoints/behavior live in `apps/api/src/portal/frameio/oauth.py`.
   required and must be requested explicitly** — Adobe auto-adds it on interactive consent but NOT on
   refresh, so without it every *refreshed* token is rejected `401` ~1h after connect. `offline_access`
   is required for a refresh token. Beyond `AdobeID`, authorization is **role-based, not scope-based**.
-- Tokens stored encrypted (AES-GCM, `portal.lib.crypto.TokenCipher`, keyed by `TOKEN_ENCRYPTION_KEY`)
+- Tokens stored encrypted (AES-GCM, `TokenCipher` in `src/crypto.rs` — same wire format as the
+  Python `portal.lib.crypto.TokenCipher` — keyed by `TOKEN_ENCRYPTION_KEY`)
   on `frameio_connections` with `token_expires_at`; refreshed before use with a ~5-min skew. Always
   trust the returned `expires_in`; don't hardcode lifetimes.
 - Redirect URI: `FRAMEIO_REDIRECT_URI`, default `{BASE_URL}/api/frameio/oauth/callback` — the exact
