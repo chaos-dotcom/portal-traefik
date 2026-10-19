@@ -128,6 +128,14 @@ Port divergences fixed along the way:
   unbounded concurrency; sync downloads used a 300s total (not per-read) timeout and no job
   timeout; job errors stored as Rust `Debug` text.
 - The harness excluded `x-request-id` from comparison; it now pins and compares it.
+- `TokenCipher` derived a different AES key than Python for a 43-character
+  `secrets.token_urlsafe(32)` key (Rust also accepted unpadded base64; Python's decoder requires
+  padding and hashes the key instead). Found in production: Python-stored secrets (Frame.io tokens
+  and client secret, SMTP password, TOTP secret) were unreadable, while Settings still said
+  "connected". Derivation now matches Python byte for byte (test vectors from Python), `portal-api
+  migrate` re-encrypts anything an earlier Rust build stored under the old key, and
+  `/api/frameio/status` reports not connected when the stored tokens can't be decrypted
+  (deliberately stricter than Python, which only checks the row exists).
 
 Verified (against the Python service at `main`, sharing one database):
 - `capture.py`/`diff.py` 10/10 byte-identical, `authdiff.py` 22/22, cookie interop both ways.

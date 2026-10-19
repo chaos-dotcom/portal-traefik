@@ -41,7 +41,7 @@ async fn main() -> anyhow::Result<()> {
 
     // `portal-api migrate` — create or upgrade the schema; run by the entrypoint before seeding.
     if std::env::args().nth(1).as_deref() == Some("migrate") {
-        return migrate::migrate(&settings.database_url).await;
+        return migrate::migrate(&settings).await;
     }
 
     let db = sqlx::postgres::PgPoolOptions::new()

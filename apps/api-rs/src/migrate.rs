@@ -62,25 +62,35 @@ fn strip_psql_meta(sql: &str) -> String {
     sql.lines().filter(|l| !l.starts_with('\\')).collect::<Vec<_>>().join("\n")
 }
 
-/// Bring the database to the head schema, or fail with an operator-facing message.
-pub async fn migrate(database_url: &str) -> anyhow::Result<()> {
+/// Bring the database to the head schema (or fail with an operator-facing message), then
+/// re-encrypt any secret an earlier Rust build stored under its mismatched key.
+pub async fn migrate(settings: &crate::config::Settings) -> anyhow::Result<()> {
     // A dedicated connection: pg_dump's preamble resets search_path for the session, which must
     // not leak into the pool the API uses.
-    let mut conn = PgConnection::connect(database_url).await?;
+    let mut conn = PgConnection::connect(&settings.database_url).await?;
+    schema(&mut conn).await?;
+    let rekeyed = crate::crypto::rekey_legacy_values(&mut conn, &settings.token_encryption_key).await?;
+    if rekeyed > 0 {
+        tracing::info!("migrate: re-encrypted {rekeyed} secret(s) written under the old Rust key derivation");
+    }
+    Ok(())
+}
+
+async fn schema(conn: &mut PgConnection) -> anyhow::Result<()> {
     let head = head_revision();
 
     let has_schema: bool = sqlx::query_scalar("SELECT to_regclass('public.users') IS NOT NULL")
-        .fetch_one(&mut conn)
+        .fetch_one(&mut *conn)
         .await?;
     if !has_schema {
         tracing::info!("migrate: empty database, applying schema at {head}");
         // AssertSqlSafe: the shipped schema file, not user input.
-        sqlx::raw_sql(sqlx::AssertSqlSafe(strip_psql_meta(SCHEMA))).execute(&mut conn).await?;
+        sqlx::raw_sql(sqlx::AssertSqlSafe(strip_psql_meta(SCHEMA))).execute(&mut *conn).await?;
         return Ok(());
     }
 
     let current: Option<String> = sqlx::query("SELECT version_num FROM alembic_version")
-        .fetch_optional(&mut conn)
+        .fetch_optional(&mut *conn)
         .await?
         .map(|r| r.get("version_num"));
     let Some(current) = current else {
@@ -89,7 +99,7 @@ pub async fn migrate(database_url: &str) -> anyhow::Result<()> {
         tracing::info!("migrate: stamping schema revision {head}");
         sqlx::query("INSERT INTO alembic_version (version_num) VALUES ($1)")
             .bind(head)
-            .execute(&mut conn)
+            .execute(&mut *conn)
             .await?;
         return Ok(());
     };
@@ -107,11 +117,11 @@ pub async fn migrate(database_url: &str) -> anyhow::Result<()> {
     for step in steps {
         tracing::info!("migrate: {} -> {}", step.from, step.to);
         // Alembic's --sql output wraps itself in BEGIN/COMMIT and updates alembic_version.
-        sqlx::raw_sql(sqlx::AssertSqlSafe(strip_psql_meta(step.sql))).execute(&mut conn).await?;
+        sqlx::raw_sql(sqlx::AssertSqlSafe(strip_psql_meta(step.sql))).execute(&mut *conn).await?;
         sqlx::query("UPDATE alembic_version SET version_num = $1 WHERE version_num = $2")
             .bind(step.to)
             .bind(step.from)
-            .execute(&mut conn)
+            .execute(&mut *conn)
             .await?;
     }
     tracing::info!("migrate: schema is at {head}");

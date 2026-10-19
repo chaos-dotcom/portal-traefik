@@ -20,19 +20,36 @@ pub async fn me(admin: Admin) -> Response {
 }
 
 pub async fn frameio_status(State(state): State<AppState>, admin: Admin) -> Response {
-    let row = sqlx::query_as::<_, (Option<String>, Option<DateTime<Utc>>)>(
-        "SELECT adobe_email, token_expires_at FROM frameio_connections WHERE user_id = $1 LIMIT 1",
+    type Row = (Option<String>, Option<DateTime<Utc>>, Option<String>, Option<String>);
+    let row = sqlx::query_as::<_, Row>(
+        "SELECT adobe_email, token_expires_at, access_token_encrypted, refresh_token_encrypted
+           FROM frameio_connections WHERE user_id = $1 LIMIT 1",
     )
     .bind(admin.id)
     .fetch_optional(&state.db)
     .await;
 
+    // A connection whose tokens this instance can't decrypt (TOKEN_ENCRYPTION_KEY changed, or
+    // written under a different key derivation) is as good as none: every Frame.io call would
+    // fail. Report it as not connected — deliberately unlike Python, which only checks the row
+    // exists — so Settings offers "Connect" instead of claiming a connection that doesn't work.
+    let cipher = crate::crypto::TokenCipher::new(&state.settings.token_encryption_key);
+    let usable = |t: &Option<String>| t.as_deref().is_some_and(|v| cipher.decrypt(v).is_ok());
+    let row = row.map(|r| {
+        r.filter(|(_, _, access, refresh)| {
+            let ok = usable(access) || usable(refresh);
+            if !ok {
+                tracing::warn!("frameio.status.undecryptable_tokens user_id={}", admin.id);
+            }
+            ok
+        })
+    });
     let body = match row {
         Ok(None) => json!({
             "connected": false, "adobe_email": null, "expires_at": null,
             "needs_refresh": null, "scopes": null,
         }),
-        Ok(Some((adobe_email, token_expires_at))) => {
+        Ok(Some((adobe_email, token_expires_at, _, _))) => {
             let needs_refresh = match token_expires_at {
                 None => true,
                 Some(exp) => (exp - Utc::now()).num_seconds() <= REFRESH_SKEW_SECONDS,
