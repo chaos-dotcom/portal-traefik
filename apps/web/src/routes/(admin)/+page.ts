@@ -9,6 +9,8 @@ export type ActiveUpload = {
   uploaded_bytes: number | null;
   total_bytes: number | null;
   started_at: string | null;
+  link_id?: string;
+  last_activity_at?: string | null;
 };
 
 export type RecentTransfer = {

@@ -1,7 +1,8 @@
 <script lang="ts">
-  import { invalidateAll } from "$app/navigation";
   import { Card, Button, StatusPill, CopyButton } from "$lib/components";
   import { formatBytes } from "$lib/format";
+  import { refreshOnChange } from "$lib/live.svelte";
+  import { fmtDuration, fmtSpeed } from "$lib/links";
   import type { RecentTransfer } from "./+page";
 
   let { data } = $props();
@@ -13,34 +14,9 @@
   // Sync jobs queued or downloading right now.
   const syncing = $derived(health.running + health.queued);
 
-  // Live-refresh while anything is in flight: briskly while files upload or sync jobs are queued
-  // or downloading, gently while jobs only wait on Frame.io (or the share), then go quiet.
-  // Stopping the moment the upload finished froze the dashboard while its last files were still
-  // syncing to the NAS, so it read "done" minutes early (issue #85).
-  const refreshMs = $derived(
-    active.length > 0 || syncing > 0 ? 4000 : health.waiting > 0 ? 30_000 : 0,
-  );
-  // A hidden tab doesn't poll (each tick re-runs every load on the page); it catches up the moment
-  // it's shown again.
-  $effect(() => {
-    if (!refreshMs) return;
-    let busy = false;
-    const refresh = async () => {
-      if (document.hidden || busy) return;
-      busy = true;
-      try {
-        await invalidateAll();
-      } finally {
-        busy = false;
-      }
-    };
-    const t = setInterval(refresh, refreshMs);
-    document.addEventListener("visibilitychange", refresh);
-    return () => {
-      clearInterval(t);
-      document.removeEventListener("visibilitychange", refresh);
-    };
-  });
+  // Live: the page reloads whenever uploads, downloads or sync jobs change (server-sent events),
+  // and falls back to a gentle timer only if the event stream can't connect.
+  $effect(() => refreshOnChange(active.length > 0 || syncing > 0 ? 8000 : 30_000));
 
   const fmtBytes = (n: number | null): string => (n == null ? "—" : formatBytes(n));
 
@@ -58,10 +34,21 @@
     try { return new URL(url).pathname; } catch { return url; }
   }
 
+  // Plain words for job and upload states (the API's are internal names).
+  const statusWords: Record<string, string> = {
+    done: "copied",
+    pending: "queued",
+    running: "copying",
+    waiting: "waiting",
+    dead_letter: "failed",
+    skipped: "skipped",
+    incomplete: "didn't finish",
+  };
+
   const kindMeta: Record<string, { label: string; cls: string }> = {
-    upload: { label: "↑ Upload", cls: "text-info" },
-    download: { label: "↓ Download", cls: "text-accent" },
-    sync: { label: "⇄ Sync", cls: "text-muted" },
+    upload: { label: "Received", cls: "text-info" },
+    download: { label: "Sent", cls: "text-accent" },
+    sync: { label: "To NAS", cls: "text-muted" },
   };
 </script>
 
@@ -83,21 +70,29 @@
   {#if active.length > 0}
     <Card class="border-accent/30">
       <div class="mb-3 flex items-center gap-2">
-        <span class="h-2 w-2 rounded-full bg-accent animate-pulse-dot"></span>
+        <span class="live-dot"></span>
         <h2 class="text-sm font-semibold">Uploading now</h2>
         <span class="text-xs text-faint">({active.length})</span>
       </div>
-      <div class="space-y-2">
+      <div class="divide-y divide-border">
         {#each active as u (u.id)}
-          <div class="flex items-center justify-between gap-4 text-sm">
-            <div class="min-w-0">
-              <span class="font-medium">{u.brand ?? "Upload"}</span>
-              {#if u.who}<span class="text-muted"> · {u.who}</span>{/if}
+          {@const done = u.uploaded_bytes ?? 0}
+          {@const pct = u.total_bytes ? Math.min(100, (100 * done) / u.total_bytes) : null}
+          {@const secs = u.started_at && u.last_activity_at ? (Date.parse(u.last_activity_at) - Date.parse(u.started_at)) / 1000 : 0}
+          {@const bps = secs >= 1 && done > 0 ? done / secs : null}
+          {@const eta = bps && u.total_bytes && u.total_bytes > done ? fmtDuration((u.total_bytes - done) / bps) : null}
+          <div class="grid gap-1.5 py-2.5 first:pt-0 last:pb-0">
+            <div class="flex items-center justify-between gap-4 text-sm">
+              <div class="min-w-0 truncate">
+                <a href={u.link_id ? `/upload-links/${u.link_id}` : "/links"} class="font-medium hover:text-accent">{u.brand ?? "Upload"}</a>
+                {#if u.who}<span class="text-muted"> · {u.who}</span>{/if}
+              </div>
+              <div class="tnum shrink-0 text-xs text-muted">
+                {fmtBytes(done)}{#if u.total_bytes} of {fmtBytes(u.total_bytes)}{/if} · {fmtSpeed(bps)}{#if eta} · <span class="text-text">{eta} left</span>{/if}
+              </div>
             </div>
-            <div class="shrink-0 text-xs text-muted">
-              {#if u.uploaded_bytes != null}{fmtBytes(u.uploaded_bytes)} of {/if}{fmtBytes(
-                u.total_bytes
-              )}{#if u.started_at} · started {timeAgo(u.started_at)}{/if}
+            <div class="relative h-1 overflow-hidden rounded-full bg-surface-3">
+              <i class="absolute inset-y-0 left-0 rounded-full bg-accent transition-[width] duration-500" style="width:{pct ?? 6}%"></i>
             </div>
           </div>
         {/each}
@@ -132,7 +127,7 @@
   {/if}
 
   <!-- Quick links: upload + download, side by side on desktop, stacked on mobile -->
-  {#snippet linkList(title: string, href: string, links: { id: string; public_url: string; brand_display_name?: string | null }[])}
+  {#snippet linkList(title: string, href: string, links: { id: string; public_url: string; name: string }[])}
     <Card padded={false}>
       <div class="flex items-center justify-between border-b border-border px-5 py-3">
         <h2 class="text-sm font-semibold">{title}</h2>
@@ -145,7 +140,7 @@
           {#each links.slice(0, 5) as l (l.id)}
             <div class="flex items-center justify-between gap-2 px-5 py-2.5">
               <div class="min-w-0">
-                <div class="truncate text-sm font-medium">{l.brand_display_name ?? "Untitled"}</div>
+                <div class="truncate text-sm font-medium">{l.name}</div>
                 <CopyButton value={l.public_url} label={shortUrl(l.public_url)} class="text-xs" />
               </div>
               <Button href={l.public_url} target="_blank" rel="noopener" variant="ghost" size="sm">Open</Button>
@@ -157,8 +152,8 @@
   {/snippet}
 
   <div class="grid gap-6 sm:grid-cols-2">
-    {@render linkList("Upload links", "/upload-links", data.activeUpload)}
-    {@render linkList("Download links", "/download-links", data.activeDownload)}
+    {@render linkList("Receiving", "/links", data.activeUpload)}
+    {@render linkList("Sending", "/links", data.activeDownload)}
   </div>
 
   <!-- Recent feed -->
@@ -180,7 +175,7 @@
             </div>
             <div class="flex shrink-0 items-center gap-2">
               <span class="hidden text-xs text-faint sm:inline">{fmtBytes(r.bytes)}</span>
-              {#if r.kind === "sync" || r.status === "incomplete"}<span class="hidden sm:block"><StatusPill status={r.status} /></span>{/if}
+              {#if r.kind === "sync" || r.status === "incomplete"}<span class="hidden sm:block"><StatusPill status={r.status} label={statusWords[r.status]} /></span>{/if}
               <span class="text-right text-xs text-faint">{timeAgo(r.at)}</span>
             </div>
           </div>

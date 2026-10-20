@@ -189,6 +189,96 @@ pub async fn list_folders(State(state): State<AppState>, _: Admin, Query(q): Que
     picker(&state, state.frameio.list_subfolders(&account_id, &folder_id)).await
 }
 
+/// `GET /api/frameio/search?account_id=&q=` — projects and folders named like `q`, anywhere in
+/// the account. Folder hits say which project they're in (`where`).
+pub async fn search(State(state): State<AppState>, _: Admin, Query(q): Query<HashMap<String, String>>) -> Response {
+    let account_id = q.get("account_id").cloned().unwrap_or_default();
+    let query = q.get("q").map(|s| s.trim().to_string()).unwrap_or_default();
+    if account_id.is_empty() || query.chars().count() < 2 {
+        return Json(json!([])).into_response();
+    }
+    let hits = match state.frameio.search(&account_id, &query, 30).await {
+        Ok(h) => h,
+        Err(e) => return picker_error(e),
+    };
+    // Name each folder's project. Few distinct projects come back per search; look each up once.
+    let mut project_ids: Vec<String> = Vec::new();
+    for h in &hits {
+        if let Some(p) = &h.project_id
+            && h.kind == "folder"
+            && !project_ids.contains(p)
+            && project_ids.len() < 10
+        {
+            project_ids.push(p.clone());
+        }
+    }
+    let lookups = futures::future::join_all(project_ids.iter().map(|p| state.frameio.get_project(&account_id, p))).await;
+    let names: HashMap<String, String> = project_ids
+        .into_iter()
+        .zip(lookups)
+        .filter_map(|(id, r)| r.ok().map(|p| (id, p.name)))
+        .collect();
+    let out: Vec<Value> = hits
+        .iter()
+        .map(|h| {
+            json!({
+                "kind": h.kind,
+                "id": h.id,
+                "name": h.name,
+                "project_id": h.project_id,
+                "workspace_id": h.workspace_id,
+                "root_folder_id": h.root_folder_id,
+                "where": if h.kind == "folder" { h.project_id.as_ref().and_then(|p| names.get(p)).cloned() } else { None },
+            })
+        })
+        .collect();
+    Json(Value::Array(out)).into_response()
+}
+
+/// `GET /api/frameio/path?account_id=&folder_id=` — where a folder lives: its project (and that
+/// project's workspace) and the breadcrumb from the project root down to it, the root named after
+/// the project. Lets the picker jump straight to a search hit or reopen at a saved folder.
+pub async fn folder_path(State(state): State<AppState>, _: Admin, Query(q): Query<HashMap<String, String>>) -> Response {
+    let account_id = q.get("account_id").cloned().unwrap_or_default();
+    let folder_id = q.get("folder_id").cloned().unwrap_or_default();
+    let folder = match state.frameio.get_folder(&account_id, &folder_id).await {
+        Ok(f) => f,
+        Err(e) => return picker_error(e),
+    };
+    let Some(project_id) = folder.project_id.clone() else {
+        return detail(StatusCode::NOT_FOUND, "Frame.io item not found");
+    };
+    let (ancestry, project) = tokio::join!(
+        state.frameio.folder_ancestry(&account_id, &folder_id),
+        state.frameio.get_project(&account_id, &project_id),
+    );
+    let (ancestry, project) = match (ancestry, project) {
+        (Ok(a), Ok(p)) => (a, p),
+        (Err(e), _) | (_, Err(e)) => return picker_error(e),
+    };
+    // The ancestry walks up to the account's top; start the breadcrumb at the project root.
+    let start = ancestry
+        .iter()
+        .position(|i| Some(&i.id) == project.root_folder_id.as_ref())
+        .unwrap_or(0);
+    let path: Vec<Value> = ancestry[start..]
+        .iter()
+        .enumerate()
+        .map(|(i, f)| json!({ "id": f.id, "name": if i == 0 { project.name.clone() } else { f.name.clone() } }))
+        .collect();
+    Json(json!({
+        "account_id": account_id,
+        "workspace_id": project.workspace_id,
+        "project_id": project.id,
+        "project_name": project.name,
+        "root_folder_id": project.root_folder_id,
+        "folder_id": folder_id,
+        "folder_name": path.last().and_then(|p| p.get("name")).cloned().unwrap_or(json!(folder.name)),
+        "path": path,
+    }))
+    .into_response()
+}
+
 pub async fn create_folder(State(state): State<AppState>, _: Admin, Json(body): Json<Value>) -> Response {
     let name = body.get("name").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
     if name.is_empty() {

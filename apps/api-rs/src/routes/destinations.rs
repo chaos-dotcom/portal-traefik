@@ -16,7 +16,7 @@ use uuid::Uuid;
 use crate::auth::Admin;
 use crate::error::detail;
 use crate::services::frameio_paths::{clean_path, refresh_config_path, resolve_folder_path, stamp_path};
-use crate::services::sync_coverage::{rules_covering, Rule};
+use crate::services::sync_coverage::{coverage_json, Rule};
 use crate::state::AppState;
 
 fn link_state(row: &sqlx::postgres::PgRow) -> &'static str {
@@ -32,37 +32,13 @@ fn link_state(row: &sqlx::postgres::PgRow) -> &'static str {
 }
 
 async fn load_rules(state: &AppState) -> Vec<Rule> {
-    sqlx::query("SELECT id, name, destination_path, enabled, source_config FROM sync_rules")
-        .fetch_all(&state.db)
-        .await
-        .unwrap_or_default()
-        .iter()
-        .map(|r| Rule {
-            id: r.get("id"),
-            name: r.get("name"),
-            destination_path: r.get("destination_path"),
-            enabled: r.get("enabled"),
-            source_config: r.get("source_config"),
-        })
-        .collect()
+    crate::services::sync_coverage::load_rules(&state.db).await
 }
 
 /// Render a destination row plus its covering rules and upload links.
 fn render(dest: &sqlx::postgres::PgRow, rules: &[Rule], links: &[sqlx::postgres::PgRow]) -> Value {
     let config: Value = dest.get("config");
-    let covering: Vec<Value> = rules_covering(&config, rules)
-        .into_iter()
-        .map(|(rule, exact)| {
-            json!({
-                "id": rule.id.to_string(),
-                "name": rule.name,
-                "destination_path": rule.destination_path,
-                "enabled": rule.enabled,
-                "recursive": rule.source_config.get("recursive").and_then(|v| v.as_bool()).unwrap_or(true),
-                "exact": exact,
-            })
-        })
-        .collect();
+    let covering = coverage_json(&config, rules);
     let mut link_out: Vec<Value> = links
         .iter()
         .map(|row| {

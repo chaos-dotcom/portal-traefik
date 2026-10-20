@@ -1,202 +1,166 @@
 <script lang="ts">
   import { goto } from "$app/navigation";
-  import { onMount } from "svelte";
-  import {
-    ProjectFolderBrowser,
-    TemplateTokenInput,
-    type FolderBrowserInit,
-    type FolderItem,
-  } from "$lib/components";
+  import { untrack } from "svelte";
+  import { FolderField, Icon, Switch, TemplateTokenInput } from "$lib/components";
+  import { coveringRules, crumbNames, type FolderRef } from "$lib/frameio";
+  import { recentFolders } from "$lib/recents";
+  import { errorDetail, toast } from "$lib/toast.svelte";
   import { SYNC_TOKENS } from "$lib/tokens";
+  import type { SyncRule } from "../+page";
 
-  let accountId = $state("");
-  let workspaceId = $state("");
-  let projectId = $state("");
-  let projectName = $state("");
-  let folderPath = $state<FolderItem[]>([]);
-  let chosenFolder = $state<FolderItem | null>(null);
+  let { data } = $props();
+  const rules = $derived(data.rules as SyncRule[]);
+  const recents = $derived(recentFolders(data.uploads));
 
-  // Options
-  let name = $state("");
+  // Seeded once from the page data (a "Sync this folder" link); the form owns them after that.
+  const initial = untrack(() => data.folder);
+  let folder = $state<FolderRef | null>(initial);
+  let name = $state(initial ? (crumbNames(initial).at(-1) ?? "") : "");
+  let nameTouched = $state(false);
   let destinationPath = $state("");
+  let pathTouched = $state(false);
   let recursive = $state(true);
   let conflictPolicy = $state("rename_suffix");
   let pathTemplate = $state("");
   let enabled = $state(true);
-
-  let error = $state<string | null>(null);
   let saving = $state(false);
+  let error = $state<string | null>(null);
 
-  const currentFolder = $derived(folderPath.at(-1) ?? null);
-
-  // "+ Sync rule here" on a destination: seed the browser at the destination's folder. The
-  // browser only renders once the prefill is resolved, so the pickers mount pre-seeded.
-  let prefill = $state<FolderBrowserInit | undefined>(undefined);
-  let prefillLoading = $state(true);
-
-  onMount(async () => {
-    const destId = new URLSearchParams(window.location.search).get("destination");
-    if (!destId) {
-      prefillLoading = false;
-      return;
-    }
-    try {
-      const res = await fetch(`/api/destinations/${destId}`);
-      if (res.ok) {
-        const dest = await res.json();
-        const cfg = dest.config ?? {};
-        if (cfg.account_id && cfg.workspace_id && cfg.project_id && cfg.folder_id) {
-          const path: FolderItem[] = Array.isArray(cfg.path) && cfg.path.length > 0
-            ? cfg.path
-            : [{ id: cfg.folder_id, name: cfg.folder_name ?? cfg.folder_id }];
-          prefill = {
-            accountId: cfg.account_id,
-            workspaceId: cfg.workspace_id,
-            projectId: cfg.project_id,
-            projectName: cfg.project_name ?? "",
-            folderPath: path,
-          };
-          chosenFolder = path.at(-1) ?? null;
-          if (!name.trim()) name = dest.display_name ?? "";
-        }
-      }
-    } catch {
-      // Prefill is a convenience; fall back to the empty picker.
-    } finally {
-      prefillLoading = false;
-    }
+  // Suggest a NAS path next to the ones existing rules use: <their parent>/<folder name>.
+  const nasParent = $derived.by(() => {
+    const p = rules[0]?.destination_path?.replace(/\/+$/, "");
+    return p && p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : "";
+  });
+  $effect(() => {
+    if (!pathTouched && folder && nasParent) destinationPath = `${nasParent}/${crumbNames(folder).at(-1)}`;
   });
 
-  function chooseFolder() {
-    chosenFolder = currentFolder;
-    if (!name.trim() && chosenFolder) name = chosenFolder.name;
+  const already = $derived(coveringRules(folder, rules.map((r) => ({ ...r, source: r.source }))));
+
+  function onFolder(f: FolderRef) {
+    if (!nameTouched) name = crumbNames(f).at(-1) ?? "";
   }
 
   async function create() {
-    if (!chosenFolder) {
-      error = "Pick the folder to watch.";
+    error = null;
+    if (!folder) {
+      error = "Choose the Frame.io folder to watch.";
       return;
     }
     if (!destinationPath.trim()) {
-      error = "Set a local destination path.";
+      error = "Enter where on the NAS the files should go.";
       return;
     }
     saving = true;
-    error = null;
     try {
-      const body = {
-        name: name.trim() || chosenFolder.name,
-        source: {
-          type: "frameio",
-          account_id: accountId,
-          workspace_id: workspaceId,
-          project_id: projectId,
-          folder_id: chosenFolder.id,
-          recursive,
-          // Names + path sent so the backend skips the tightly rate-limited folder lookups.
-          folder_name: chosenFolder.name,
-          project_name: projectName,
-          path: folderPath.at(-1)?.id === chosenFolder.id ? folderPath : null,
-        },
-        destination_path: destinationPath.trim(),
-        conflict_policy: conflictPolicy,
-        path_template: pathTemplate.trim() || null,
-        enabled,
-      };
       const res = await fetch("/api/sync-rules", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
+        body: JSON.stringify({
+          name: name.trim() || crumbNames(folder).at(-1),
+          source: {
+            type: "frameio",
+            account_id: folder.account_id,
+            workspace_id: folder.workspace_id,
+            project_id: folder.project_id,
+            folder_id: folder.folder_id,
+            recursive,
+            // Names + path ride along so the backend skips the tightly rate-limited lookups.
+            folder_name: folder.folder_name,
+            project_name: folder.project_name,
+            path: folder.path,
+          },
+          destination_path: destinationPath.trim(),
+          conflict_policy: conflictPolicy,
+          path_template: pathTemplate.trim() || null,
+          enabled,
+        }),
       });
       if (!res.ok) {
-        error = (await res.json().catch(() => ({}))).detail ?? `Could not create (${res.status})`;
+        error = await errorDetail(res, "Could not create the rule");
         return;
       }
-      await goto("/sync-rules");
+      toast(`Watching ${crumbNames(folder).at(-1)}. Files already there follow on the next scheduled check.`);
+      await goto("/sync");
     } finally {
       saving = false;
     }
   }
+
+  const input = "h-8 w-full rounded-md border border-border bg-bg px-2.5 text-[13px] text-text outline-none placeholder:text-faint hover:border-border-strong focus:border-accent focus:ring-3 focus:ring-accent-soft";
+  const line = "grid grid-cols-1 gap-2 border-t border-border py-3.5 sm:grid-cols-[120px_minmax(0,1fr)] sm:gap-4";
+  const label = "pt-2 text-xs font-medium text-faint";
 </script>
 
-<div class="mx-auto max-w-2xl space-y-6">
-  <div>
-    <a href="/sync-rules" class="text-sm text-muted hover:text-text">← Destinations</a>
-    <h1 class="mt-1 text-2xl font-semibold">New sync rule</h1>
-  </div>
+<div class="mx-auto max-w-3xl text-[13px]">
+  <div class="rounded-xl border border-border bg-surface">
+    <div class="flex items-center gap-3 border-b border-border px-5 py-3.5 sm:px-7">
+      <h1 class="flex-1 text-base font-semibold text-text">New sync rule</h1>
+      <a href="/sync" class="grid h-8 w-8 place-items-center rounded-md text-faint hover:bg-surface-3 hover:text-text" aria-label="Close"><Icon name="x" /></a>
+    </div>
+    <div class="px-5 pt-3 pb-2 sm:px-7">
+      {#if error}<p class="mb-3 rounded-md bg-danger/10 px-3 py-2 text-danger">{error}</p>{/if}
 
-  {#if error}<p class="rounded-md bg-danger/10 px-3 py-2 text-sm text-danger">{error}</p>{/if}
-
-  <div class="space-y-5 rounded-xl border border-border bg-surface p-6">
-    <h2 class="font-medium">Source folder</h2>
-
-    {#if !prefillLoading}
-      <ProjectFolderBrowser
-        bind:accountId
-        bind:workspaceId
-        bind:projectId
-        bind:projectName
-        bind:folderPath
-        initial={prefill}
-      >
-        {#snippet crumbAction()}
-          <button onclick={chooseFolder} class="ml-auto rounded border border-border bg-surface px-2 py-0.5 text-xs hover:bg-surface-2">Watch this folder</button>
-        {/snippet}
-      </ProjectFolderBrowser>
-    {:else}
-      <p class="text-xs text-faint">Loading…</p>
-    {/if}
-
-    {#if chosenFolder}
-      <div class="flex items-center justify-between rounded-md bg-accent px-3 py-2 text-sm text-on-accent">
-        <span>Watching: <span class="font-medium">{chosenFolder.name}</span></span>
-        <label class="flex items-center gap-1.5 text-xs text-faint">
-          <input type="checkbox" bind:checked={recursive} /> Include subfolders
-        </label>
+      <div class="{line} border-t-0">
+        <div class={label}>Watch</div>
+        <div class="grid min-w-0 gap-2">
+          <FolderField bind:value={folder} {recents} title="Watch this Frame.io folder" chooseVerb="Watch" onchange={onFolder} />
+          <label class="flex items-center gap-2 text-muted"><input type="checkbox" bind:checked={recursive} /> Include subfolders</label>
+          {#if already.length}
+            <p class="flex items-start gap-2 text-xs text-warning">
+              <Icon name="warning" size={14} />
+              <span>“{already[0].name}” already copies this folder{already[0].exact ? "" : " (through a parent folder)"} to <span class="font-mono">{already[0].destination_path}</span>. A second rule copies its files twice.</span>
+            </p>
+          {/if}
+        </div>
       </div>
-    {/if}
-  </div>
 
-  <div class="space-y-4 rounded-xl border border-border bg-surface p-6">
-    <h2 class="font-medium">Options</h2>
-    <label class="block text-sm">
-      <span class="text-muted">Rule name</span>
-      <input bind:value={name} placeholder="defaults to the folder name" class="mt-1 w-full rounded-md border border-border px-2 py-1.5" />
-    </label>
-    <label class="block text-sm">
-      <span class="text-muted">Destination path (on the Portal host)</span>
-      <input bind:value={destinationPath} placeholder="/data/incoming" class="mt-1 w-full rounded-md border border-border px-2 py-1.5 font-mono" />
-    </label>
-    <label class="block text-sm">
-      <span class="text-muted">On filename conflict</span>
-      <select bind:value={conflictPolicy} class="mt-1 w-full rounded-md border border-border px-2 py-1.5">
-        <option value="rename_suffix">Rename (add suffix)</option>
-        <option value="skip">Skip</option>
-        <option value="overwrite">Overwrite</option>
-      </select>
-    </label>
-    <div class="block text-sm">
-      <span class="text-muted">Path template (optional)</span>
-      <TemplateTokenInput bind:value={pathTemplate} tokens={SYNC_TOKENS} placeholder={"{project}/{date}/{filename}"} />
-      <p class="mt-1 text-xs text-faint">Leave blank to keep original names at the destination root.</p>
-    </div>
-    <div class="rounded-md border border-border bg-surface-2 p-3 text-xs text-muted">
-      <div class="mb-1 font-medium text-faint">Examples</div>
-      <ul class="space-y-0.5 font-mono">
-        <li>{"{project}/{date}/{filename}"} → Acme/2026-06-12/clip.mov</li>
-        <li>{"{year}/{month}/{filename}"} → 2026/06/clip.mov</li>
-        <li>{"{folder}/{stem}{ext}"} → Dailies/clip.mov</li>
-      </ul>
-    </div>
-    <label class="flex items-center gap-1.5 text-sm">
-      <input type="checkbox" bind:checked={enabled} /> Enable now (creates the Frame.io webhook)
-    </label>
-  </div>
+      <div class={line}>
+        <div class={label}><label for="sr-path">Copy to</label></div>
+        <div class="grid gap-1.5">
+          <input id="sr-path" class="{input} font-mono text-xs" bind:value={destinationPath} oninput={() => (pathTouched = true)} placeholder="/volume1/Clients/Northlight" autocomplete="off" spellcheck="false" />
+          <div class="text-xs text-faint">A folder on the NAS, as the Portal container sees it. Subfolders from Frame.io are kept.</div>
+        </div>
+      </div>
 
-  <div class="flex items-center gap-3">
-    <button onclick={create} disabled={saving || !chosenFolder} class="rounded-md bg-accent px-4 py-2 text-sm font-medium text-on-accent hover:bg-accent-hover disabled:opacity-50">
-      {saving ? "Creating…" : "Create rule"}
-    </button>
-    <a href="/sync-rules" class="text-sm text-muted hover:text-text">Cancel</a>
+      <div class={line}>
+        <div class={label}><label for="sr-name">Name</label></div>
+        <input id="sr-name" class={input} bind:value={name} oninput={() => (nameTouched = true)} placeholder="Defaults to the folder name" autocomplete="off" />
+      </div>
+
+      <div class={line}>
+        <div class={label}><label for="sr-conflict">Same name</label></div>
+        <select id="sr-conflict" class="{input} max-w-72" bind:value={conflictPolicy}>
+          <option value="rename_suffix">Keep both (add a number)</option>
+          <option value="skip">Keep the file already there</option>
+          <option value="overwrite">Replace it</option>
+        </select>
+      </div>
+
+      <div class={line}>
+        <div class={label}>Organize</div>
+        <div class="min-w-0">
+          <TemplateTokenInput bind:value={pathTemplate} tokens={SYNC_TOKENS} placeholder={"{project}/{date}/{filename}"} />
+          <p class="mt-1 text-xs text-faint">Leave empty to keep Frame.io's folder structure as it is.</p>
+        </div>
+      </div>
+
+      <div class={line}>
+        <div class={label}>Start</div>
+        <div class="flex items-center gap-3">
+          <div class="min-w-0 flex-1">
+            <b class="block font-medium text-text">Watch now</b>
+            <small class="block text-xs text-faint">Creates the Frame.io webhook so new files are copied as soon as they arrive</small>
+          </div>
+          <Switch bind:checked={enabled} label="Watch now" />
+        </div>
+      </div>
+    </div>
+    <div class="flex items-center justify-end gap-2 border-t border-border px-5 py-3.5 sm:px-7">
+      <a href="/sync" class="inline-flex h-8 items-center rounded-md px-3 font-medium text-muted hover:bg-surface-3 hover:text-text">Cancel</a>
+      <button type="button" class="inline-flex h-8 items-center rounded-md bg-accent px-4 font-medium text-on-accent hover:bg-accent-hover disabled:opacity-50" disabled={saving} onclick={create}>
+        {saving ? "Creating…" : "Create rule"}
+      </button>
+    </div>
   </div>
 </div>

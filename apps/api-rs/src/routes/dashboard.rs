@@ -42,7 +42,7 @@ pub async fn history(State(state): State<AppState>, _: Admin, Query(q): Query<Hi
         let rows = sqlx::query(
             "SELECT s.id, s.uploader_name, s.uploader_email, s.uploaded_bytes, s.total_bytes,
                     s.status, s.started_at, s.completed_at, s.last_activity_at, s.created_at,
-                    s.frameio_asset_ids, l.brand_display_name
+                    s.frameio_asset_ids, COALESCE(NULLIF(l.name, ''), l.brand_display_name) AS brand_display_name
                FROM upload_sessions s JOIN upload_links l ON s.upload_link_id = l.id
               WHERE s.status = 'completed'
                  OR (s.status = 'abandoned' AND s.frameio_asset_ids IS NOT NULL
@@ -146,7 +146,8 @@ pub async fn transfers(State(state): State<AppState>, _: Admin, Query(q): Query<
     // --- live uploads in flight ------------------------------------------------
     let active = sqlx::query(
         "SELECT s.id, s.uploader_name, s.uploader_email, s.uploaded_bytes, s.total_bytes,
-                s.started_at, s.frameio_asset_ids, l.brand_display_name
+                s.started_at, s.last_activity_at, s.frameio_asset_ids, l.id AS link_id,
+                COALESCE(NULLIF(l.name, ''), l.brand_display_name) AS brand_display_name
            FROM upload_sessions s JOIN upload_links l ON s.upload_link_id = l.id
           WHERE s.status = 'in_progress'
             AND COALESCE(s.last_activity_at, s.started_at, s.created_at) >= now() - interval '24 hours'
@@ -160,7 +161,7 @@ pub async fn transfers(State(state): State<AppState>, _: Admin, Query(q): Query<
     let uploads = sqlx::query(
         "SELECT s.id, s.uploader_name, s.uploader_email, s.uploaded_bytes, s.total_bytes,
                 s.status, s.started_at, s.completed_at, s.last_activity_at, s.created_at,
-                s.frameio_asset_ids, l.brand_display_name
+                s.frameio_asset_ids, COALESCE(NULLIF(l.name, ''), l.brand_display_name) AS brand_display_name
            FROM upload_sessions s JOIN upload_links l ON s.upload_link_id = l.id
           WHERE s.status = 'completed'
              OR (s.status = 'abandoned' AND s.frameio_asset_ids IS NOT NULL
@@ -182,7 +183,7 @@ pub async fn transfers(State(state): State<AppState>, _: Admin, Query(q): Query<
     .await;
 
     let syncs = sqlx::query(
-        "SELECT j.id, j.status, j.bytes, j.started_at, j.completed_at, j.created_at, r.name
+        "SELECT j.id, j.status, j.bytes, j.started_at, j.completed_at, j.created_at, j.file_name, r.name
            FROM sync_jobs j JOIN sync_rules r ON j.sync_rule_id = r.id
           ORDER BY j.created_at DESC LIMIT $1",
     )
@@ -209,6 +210,8 @@ pub async fn transfers(State(state): State<AppState>, _: Admin, Query(q): Query<
             "uploaded_bytes": row.get::<Option<i64>, _>("uploaded_bytes"),
             "total_bytes": total.or_else(|| planned_bytes(&ids)),
             "started_at": row.get::<Option<DateTime<Utc>>, _>("started_at").map(|d| crate::pyfmt::iso(&d)),
+            "link_id": row.get::<uuid::Uuid, _>("link_id").to_string(),
+            "last_activity_at": row.get::<Option<DateTime<Utc>>, _>("last_activity_at").map(|d| crate::pyfmt::iso(&d)),
         }));
     }
 
@@ -270,8 +273,8 @@ pub async fn transfers(State(state): State<AppState>, _: Admin, Query(q): Query<
             json!({
                 "id": row.get::<uuid::Uuid, _>("id").to_string(),
                 "kind": "sync",
-                "label": row.get::<String, _>("name"),
-                "who": null,
+                "label": row.get::<Option<String>, _>("file_name").unwrap_or_else(|| row.get::<String, _>("name")),
+                "who": row.get::<Option<String>, _>("file_name").map(|_| row.get::<String, _>("name")),
                 "bytes": row.get::<Option<i64>, _>("bytes"),
                 "status": row.get::<String, _>("status"),
                 "at": crate::pyfmt::iso(&at),

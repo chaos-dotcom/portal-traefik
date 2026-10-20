@@ -1,269 +1,37 @@
 <script lang="ts">
-  import { goto, invalidateAll } from "$app/navigation";
-  import { FrameioSourcePicker, type DownloadSource, type SourcePickerInit } from "$lib/components";
+  import { LinkComposer } from "$lib/components";
+  import { refreshOnChange } from "$lib/live.svelte";
+  import { timeAgo, whenFull, type DownloadEvent } from "$lib/links";
+  import { recentFolders } from "$lib/recents";
 
   let { data } = $props();
-  const link = $derived(data.link);
+  const recents = $derived(recentFolders(data.recentsFrom));
+  const events = $derived(data.events as DownloadEvent[]);
 
-  let expiresAt = $state("");
-  let newPassword = $state("");
-  let clearPassword = $state(false);
-  let maxDownloads = $state("");
-  let reqName = $state(false);
-  let reqEmail = $state(false);
-  let verifyEmail = $state(false);
-  let allowPreview = $state(true);
-  let brandDisplayName = $state("");
-  let brandSubtitle = $state("");
-
-  let saving = $state(false);
-  let error = $state<string | null>(null);
-  let saved = $state(false);
-
-  // Re-pointing the link's Frame.io source (#28). For a folder source the picker opens inside the
-  // shared folder (see `folderInit`); `newSource` tracks the picker's current selection.
-  let newSource = $state<DownloadSource | null>(null);
-
-  let seededId = "";
-  $effect(() => {
-    if (link.id !== seededId) {
-      seededId = link.id;
-      expiresAt = link.expires_at ? toLocalInput(link.expires_at) : "";
-      maxDownloads = link.max_downloads ? String(link.max_downloads) : "";
-      reqName = link.viewer_fields_required.name;
-      reqEmail = link.viewer_fields_required.email;
-      verifyEmail = link.verify_email;
-      allowPreview = link.allow_preview;
-      brandDisplayName = link.brand_display_name ?? "";
-      brandSubtitle = link.brand_subtitle ?? "";
-      newPassword = "";
-      clearPassword = false;
-    }
-  });
-
-  function toLocalInput(iso: string): string {
-    const d = new Date(iso);
-    const pad = (n: number) => String(n).padStart(2, "0");
-    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
-  }
-
-  // Log timestamps drop the seconds: four columns share a narrow card, and to-the-second precision
-  // buys nothing here (the full value stays available on hover).
-  function fmtWhen(iso: string): string {
-    return new Date(iso).toLocaleString(undefined, {
-      dateStyle: "short",
-      timeStyle: "short",
-    });
-  }
-
-  function sourceLabel(): string {
-    const s = link.source as Record<string, unknown>;
-    if (s.type === "file") return "Single file";
-    if (s.type === "folder") return s.recursive ? "Folder (recursive)" : "Folder";
-    if (s.type === "selection") return `${(s.file_ids as unknown[])?.length ?? 0} files`;
-    return "—";
-  }
-
-  // Resolved names from Frame.io (folder path / file names), falling back to the type-only label.
-  const src = $derived(data.sourceInfo);
-  function sourceLine(): string {
-    if (!src) return sourceLabel();
-    if (src.type === "folder" && src.folder_name)
-      return `Folder: ${src.folder_path || src.folder_name}${src.recursive ? " (incl. subfolders)" : ""}`;
-    if (src.type === "file" && src.files?.length) return src.files[0];
-    if (src.type === "selection") return `${src.files?.length ?? 0} files`;
-    return src.label || sourceLabel();
-  }
-
-  // When the source is a resolved folder, deep-link the explorer straight into it — including the
-  // account/workspace/project selectors resolved from the folder's project.
-  const folderInit: SourcePickerInit | null = $derived(
-    src && src.type === "folder" && src.resolved && src.account_id && src.path && src.path.length > 0
-      ? {
-          accountId: src.account_id,
-          workspaceId: src.workspace_id ?? undefined,
-          projectId: src.project_id ?? undefined,
-          path: src.path,
-          recursive: src.recursive ?? false,
-        }
-      : null,
-  );
-
-  async function save() {
-    saving = true;
-    error = null;
-    saved = false;
-    try {
-      const body: Record<string, unknown> = {
-        expires_at: expiresAt ? new Date(expiresAt).toISOString() : null,
-        max_downloads: maxDownloads ? parseInt(maxDownloads, 10) : null,
-        viewer_fields_required: { name: reqName, email: reqEmail },
-        verify_email: verifyEmail,
-        allow_preview: allowPreview,
-        brand_display_name: brandDisplayName.trim() || null,
-        brand_subtitle: brandSubtitle.trim() || null,
-      };
-      if (clearPassword) body.password = "";
-      else if (newPassword) body.password = newPassword;
-      // Only send the source when the picker's selection actually differs from the stored one, so
-      // editing other fields doesn't re-point the link (or log a spurious source change).
-      const sourceChanged =
-        newSource !== null && JSON.stringify(newSource) !== JSON.stringify(link.source);
-      if (sourceChanged) body.source = newSource;
-
-      const res = await fetch(`/api/download-links/${link.id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      if (!res.ok) {
-        error = (await res.json().catch(() => ({}))).detail ?? `Could not save (${res.status})`;
-        return;
-      }
-      saved = true;
-      newPassword = "";
-      // Reload so the source summary + download log reflect the new binding.
-      if (sourceChanged) await invalidateAll();
-    } finally {
-      saving = false;
-    }
-  }
-
-  async function remove() {
-    if (!confirm("Delete this link permanently?")) return;
-    await fetch(`/api/download-links/${link.id}`, { method: "DELETE" });
-    await goto("/download-links");
-  }
+  $effect(() => refreshOnChange());
 </script>
 
-<div class="mx-auto max-w-3xl space-y-6">
-  <div>
-    <a href="/download-links" class="text-sm text-muted hover:text-text">← Download links</a>
-    <h1 class="mt-1 text-2xl font-semibold">Edit download link</h1>
-  </div>
+<div class="space-y-6">
+  {#key data.link.id}
+    <LinkComposer mode="edit" link={data.link} {recents} rules={data.rules} branding={data.branding} emailConfigured={data.emailConfigured} />
+  {/key}
 
-  {#if error}<p class="rounded-md bg-danger/10 px-3 py-2 text-sm text-danger">{error}</p>
-  {:else if saved}<p class="rounded-md bg-success/10 px-3 py-2 text-sm text-success">Saved.</p>{/if}
-
-  <div class="rounded-xl border border-border bg-surface p-6 text-sm">
-    <div class="flex items-center justify-between">
-      <span class="text-muted">Public URL</span>
-      <a href={link.public_url} target="_blank" rel="noopener" class="max-w-xs truncate underline">{link.public_url}</a>
+  <section class="overflow-hidden rounded-xl border border-border bg-surface text-[13px] lg:mr-[364px]">
+    <div class="flex items-center gap-3 border-b border-border px-5 py-3">
+      <h2 class="flex-1 text-sm font-semibold">Download log</h2>
+      <span class="tnum text-xs text-faint">{data.stats.downloads} download{data.stats.downloads === 1 ? "" : "s"} · {data.stats.unique_viewers} {data.stats.unique_viewers === 1 ? "person" : "people"}</span>
     </div>
-    <div class="mt-2 flex items-center justify-between"><span class="text-muted">Downloads</span><span>{link.downloads_count}{link.max_downloads ? ` / ${link.max_downloads}` : ""}</span></div>
-    <div class="mt-2 flex items-center justify-between"><span class="text-muted">Unique viewers</span><span>{data.stats.unique_viewers}</span></div>
-    <div class="mt-2 flex items-center justify-between"><span class="text-muted">Last activity</span><span>{data.stats.last_activity ? new Date(data.stats.last_activity).toLocaleString() : "—"}</span></div>
-  </div>
-
-  <div class="space-y-3 rounded-xl border border-border bg-surface p-6">
-    <div>
-      <h2 class="font-medium">Source</h2>
-      <p class="mt-0.5 text-xs text-faint">
-        {#if folderInit}
-          Opened inside the shared folder below. Browse to a different folder (or pick files) to change it — the link URL stays the same.
-        {:else}
-          Re-point this link at a different file or folder — the link URL stays the same.
-        {/if}
-      </p>
-    </div>
-    {#if !folderInit && src}
-      <p class="text-sm">
-        Currently sharing: <span class="font-medium">{sourceLine()}</span>
-        {#if !src.resolved}<span class="ml-1 text-xs text-faint">(couldn't reach Frame.io to load the name)</span>{/if}
-      </p>
-    {/if}
-    <FrameioSourcePicker bind:value={newSource} initial={folderInit} onerror={(m) => (error = m)} />
-  </div>
-
-  <div class="space-y-4 rounded-xl border border-border bg-surface p-6">
-    <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
-      <label class="block text-sm">
-        <span class="text-muted">Expires</span>
-        <input type="datetime-local" bind:value={expiresAt} class="mt-1 w-full rounded-md border border-border px-2 py-1.5" />
-      </label>
-      <label class="block text-sm">
-        <span class="text-muted">Max downloads</span>
-        <input type="number" min="1" bind:value={maxDownloads} placeholder="unlimited" class="mt-1 w-full rounded-md border border-border px-2 py-1.5" />
-      </label>
-    </div>
-    <div class="text-sm">
-      <span class="text-muted">Password</span>
-      {#if link.password_protected}<span class="ml-2 text-xs text-success">currently set</span>{/if}
-      <input type="text" bind:value={newPassword} disabled={clearPassword} placeholder={link.password_protected ? "enter to change" : "set a password"} class="mt-1 w-full rounded-md border border-border px-2 py-1.5 disabled:bg-surface-2" />
-      {#if link.password_protected}
-        <label class="mt-1 flex items-center gap-1.5 text-xs text-muted"><input type="checkbox" bind:checked={clearPassword} /> Remove password</label>
-      {/if}
-    </div>
-    <div class="flex flex-wrap gap-4 text-sm">
-      <label class="flex items-center gap-1.5"><input type="checkbox" bind:checked={reqName} /> Require name</label>
-      <label class="flex items-center gap-1.5"><input type="checkbox" checked={reqEmail || verifyEmail} disabled={verifyEmail} onchange={(e) => (reqEmail = e.currentTarget.checked)} /> Require email</label>
-      <label class="flex items-center gap-1.5"><input type="checkbox" bind:checked={verifyEmail} /> Require OTP (one-time passcode by email)</label>
-      <label class="flex items-center gap-1.5"><input type="checkbox" bind:checked={allowPreview} /> Show thumbnails/previews</label>
-    </div>
-  </div>
-
-  <div class="space-y-4 rounded-xl border border-border bg-surface p-6">
-    <h2 class="font-medium">Branding</h2>
-    <label class="block text-sm">
-      <span class="text-muted">Display name</span>
-      <input bind:value={brandDisplayName} class="mt-1 w-full rounded-md border border-border px-2 py-1.5" />
-    </label>
-    <label class="block text-sm">
-      <span class="text-muted">Subtitle</span>
-      <input bind:value={brandSubtitle} class="mt-1 w-full rounded-md border border-border px-2 py-1.5" />
-    </label>
-  </div>
-
-  <div class="flex items-center justify-between">
-    <div class="flex items-center gap-3">
-      <button onclick={save} disabled={saving} class="rounded-md bg-accent px-4 py-2 text-sm font-medium text-on-accent hover:bg-accent-hover disabled:opacity-50">
-        {saving ? "Saving…" : "Save changes"}
-      </button>
-      <a href="/download-links" class="text-sm text-muted hover:text-text">Cancel</a>
-    </div>
-    <button onclick={remove} class="text-sm text-danger hover:text-danger">Delete</button>
-  </div>
-
-  <div class="space-y-3 rounded-xl border border-border bg-surface p-6">
-    <h2 class="font-medium">Download log <span class="text-xs font-normal text-faint">({data.stats.downloads})</span></h2>
-    {#if data.events.length === 0}
-      <p class="text-sm text-faint">No downloads yet.</p>
-    {:else}
-      <!-- Scrolls rather than clips: a long file name must never be silently truncated in an audit
-           log, and the four columns can't all shrink on a narrow viewport. -->
-      <div class="overflow-x-auto rounded-lg border border-border">
-        <!-- Fixed layout: with auto layout the table sizes to min-content, and an unbreakable long
-             email or an IPv6 address then shoves the file name out of view. -->
-        <table class="w-full min-w-lg table-fixed text-sm">
-          <thead class="border-b border-border text-left text-muted">
-            <tr>
-              <th class="w-[17%] px-3 py-2 font-medium">When</th>
-              <th class="w-[28%] px-3 py-2 font-medium">Viewer</th>
-              <th class="w-[20%] px-3 py-2 font-medium">IP</th>
-              <th class="w-[35%] px-3 py-2 font-medium">File</th>
-            </tr>
-          </thead>
-          <tbody class="divide-y divide-border">
-            {#each data.events as ev (ev.started_at + ev.frameio_file_id)}
-              <tr>
-                <td class="px-3 py-2 align-top text-xs text-faint" title={new Date(ev.started_at).toLocaleString()}>{fmtWhen(ev.started_at)}</td>
-                <td class="px-3 py-2 align-top text-sm break-words text-muted">
-                  {#if ev.viewer_name || ev.viewer_email}
-                    <span class="block">{ev.viewer_name ?? ev.viewer_email}</span>
-                    {#if ev.viewer_name && ev.viewer_email}
-                      <span class="block text-xs text-faint">{ev.viewer_email}</span>
-                    {/if}
-                  {:else}
-                    <span class="text-faint">Not required</span>
-                  {/if}
-                </td>
-                <td class="px-3 py-2 align-top font-mono text-xs break-all text-muted" title={ev.user_agent ?? ""}>{ev.ip ?? "—"}</td>
-                <td class="px-3 py-2 align-top font-mono text-xs break-all">{ev.file_name ?? ev.frameio_file_id}</td>
-              </tr>
-            {/each}
-          </tbody>
-        </table>
+    {#each events as e, i (i)}
+      <div class="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-4 gap-y-0.5 border-b border-border px-5 py-2.5 last:border-b-0 sm:grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)_130px]">
+        <div class="min-w-0">
+          <div class="truncate font-medium text-text">{e.viewer_name || e.viewer_email || "Someone"}</div>
+          <div class="truncate text-xs text-faint">{[e.viewer_name ? e.viewer_email : null, e.ip].filter(Boolean).join(" · ")}</div>
+        </div>
+        <span class="hidden truncate text-muted sm:block" title={e.file_name ?? e.frameio_file_id}>{e.file_name ?? e.frameio_file_id}{e.completed ? "" : " (started)"}</span>
+        <span class="text-right text-xs text-muted" title={whenFull(e.started_at)}>{timeAgo(e.started_at)}</span>
       </div>
-    {/if}
-  </div>
+    {:else}
+      <p class="px-5 py-8 text-center text-faint">Nobody has downloaded anything yet.</p>
+    {/each}
+  </section>
 </div>

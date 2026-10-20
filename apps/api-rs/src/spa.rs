@@ -97,7 +97,7 @@ async fn public_link_title(state: &AppState, page: PublicPage, token: &str) -> O
         PublicPage::Upload => {
             let row: (Option<String>, Option<String>) = sqlx::query_as(
                 "SELECT l.brand_display_name, d.display_name FROM upload_links l
-                   JOIN destinations d ON d.id = l.destination_id WHERE l.token = $1",
+                   LEFT JOIN destinations d ON d.id = l.destination_id WHERE l.token = $1",
             )
             .bind(token)
             .fetch_optional(&state.db)

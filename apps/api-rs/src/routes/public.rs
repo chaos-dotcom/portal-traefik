@@ -28,8 +28,8 @@ fn detail_response(status: StatusCode, message: &str) -> Response {
 async fn link_row(state: &AppState, token: &str) -> Result<sqlx::postgres::PgRow, Response> {
     let row = sqlx::query(
         "SELECT l.*, d.display_name AS destination_name, d.subtitle AS destination_subtitle,
-                d.config AS destination_config
-           FROM upload_links l JOIN destinations d ON d.id = l.destination_id
+                COALESCE(l.folder, d.config, '{}'::jsonb) AS link_folder
+           FROM upload_links l LEFT JOIN destinations d ON d.id = l.destination_id
           WHERE l.token = $1",
     )
     .bind(token)
@@ -400,7 +400,7 @@ pub async fn request_file_upload(
     let prefix = render_session_prefix(template.as_deref(), uploader_name.as_deref().unwrap_or(""), started_at.map(|d| d.with_timezone(&chrono::Local)));
     let effective_path = if prefix.is_empty() { path.to_string() } else { format!("{prefix}/{path}") };
 
-    let dest_cfg: Value = row.get("destination_config");
+    let dest_cfg: Value = row.get("link_folder");
     let target_folder: Option<String> = row.get("target_folder_id");
     let dest = destination_config(&dest_cfg, target_folder);
     let backend = FrameioStorageBackend::new(state.frameio.clone());
@@ -447,7 +447,7 @@ pub async fn complete_file(
     if let Err(r) = load_session(&state, link_id, &session_id).await {
         return r;
     }
-    let dest_cfg: Value = row.get("destination_config");
+    let dest_cfg: Value = row.get("link_folder");
     let dest = destination_config(&dest_cfg, None);
     let storage_session = StorageUploadSession {
         id: file_id.clone(),
@@ -467,15 +467,15 @@ pub async fn complete_file(
         }
     }
     // Start syncing this file now (dedupes by (rule, file_id) in the job table).
-    let cfg = dest_cfg.as_object().cloned().unwrap_or_default();
-    let account = cfg.get("account_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let folder = cfg.get("folder_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    if !account.is_empty() && !folder.is_empty() {
+    let has_folder = ["account_id", "folder_id"]
+        .iter()
+        .all(|k| dest_cfg.get(*k).and_then(|v| v.as_str()).is_some_and(|v| !v.is_empty()));
+    if has_folder {
         let db = state.db.clone();
         let mut redis = state.redis.clone();
         let fid = file_id.clone();
         tokio::spawn(async move {
-            let to_run = crate::sync::events::trigger_sync_for_upload(&db, &account, &folder, &[fid]).await;
+            let to_run = crate::sync::events::trigger_sync_for_upload(&db, &dest_cfg, &[fid]).await;
             for job_id in to_run {
                 let _ = queue::enqueue(&mut redis, RUN_SYNC_JOB, &job_id.to_string(), 0.0).await;
             }
@@ -540,11 +540,12 @@ pub async fn complete_session(
     let duration = started_at.map(|s| (Utc::now() - s).num_milliseconds() as f64 / 1000.0).unwrap_or(0.0);
     let link_name = row.get::<Option<String>, _>("brand_display_name")
         .filter(|s| !s.is_empty())
+        .or_else(|| row.get::<Option<String>, _>("name").filter(|s| !s.is_empty()))
         .or_else(|| row.get::<Option<String>, _>("destination_name"))
         .unwrap_or_default();
-    let cfg = row.get::<Value, _>("destination_config").as_object().cloned().unwrap_or_default();
-    let account = cfg.get("account_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let folder = cfg.get("folder_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let link_folder: Value = row.get("link_folder");
+    let account = link_folder.get("account_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let folder = link_folder.get("folder_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let file_ids: Vec<String> = entries.iter().filter_map(|e| e.get("file_id").and_then(|v| v.as_str()).map(|s| s.to_string())).collect();
 
     // Background: the completion email, the uploader's receipt and the sync trigger.
@@ -569,7 +570,7 @@ pub async fn complete_session(
         let db = state.db.clone();
         let mut redis = state.redis.clone();
         tokio::spawn(async move {
-            let to_run = crate::sync::events::trigger_sync_for_upload(&db, &account, &folder, &file_ids).await;
+            let to_run = crate::sync::events::trigger_sync_for_upload(&db, &link_folder, &file_ids).await;
             for job_id in to_run {
                 let _ = queue::enqueue(&mut redis, RUN_SYNC_JOB, &job_id.to_string(), 0.0).await;
             }

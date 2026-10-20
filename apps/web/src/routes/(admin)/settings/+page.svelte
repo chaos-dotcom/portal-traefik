@@ -1,7 +1,7 @@
 <script lang="ts">
   import { goto, invalidateAll } from "$app/navigation";
   import { page } from "$app/state";
-  import { Card, Button, StatusPill, PageHeader, Modal } from "$lib/components";
+  import { Card, Button, StatusPill, PageHeader, Modal, ConfirmButton } from "$lib/components";
   import { registerPasskey } from "$lib/webauthn";
 
   let { data } = $props();
@@ -26,7 +26,6 @@
   // --- Frame.io connection ---------------------------------------------------
   let disconnecting = $state(false);
   async function disconnect() {
-    if (!confirm("Disconnect this Frame.io account?")) return;
     disconnecting = true;
     try {
       await fetch("/api/frameio/disconnect", { method: "POST" });
@@ -212,7 +211,6 @@
     }
   }
   async function removePasskey(id: string) {
-    if (!confirm("Remove this passkey?")) return;
     await fetch(`/api/auth/passkeys/${id}`, { method: "DELETE" });
     await invalidateAll();
   }
@@ -307,7 +305,6 @@
     }
   }
   async function removeLogo() {
-    if (!confirm("Remove the logo?")) return;
     await fetch("/api/settings/branding/logo", { method: "DELETE" });
     logoVersion = Date.now();
     await invalidateAll();
@@ -350,9 +347,6 @@
   async function eraseSubject() {
     const e = subjectEmail.trim();
     if (!e) return;
-    const verb = eraseMode === "delete" ? "permanently delete" : "anonymise";
-    if (!confirm(`This will ${verb} all stored records for "${e}". This cannot be undone. Continue?`))
-      return;
     dsarBusy = true;
     dsarResult = null;
     try {
@@ -444,11 +438,15 @@
         <div class="flex justify-between"><dt class="text-muted">Token expires</dt><dd>{fmt(frameio.expires_at)}</dd></div>
         <div class="flex justify-between"><dt class="text-muted">Token health</dt><dd>{frameio.needs_refresh ? "Refresh due" : "Healthy"}</dd></div>
       </dl>
-      <Button variant="ghost" size="sm" onclick={disconnect} disabled={disconnecting}>
-        {disconnecting ? "Disconnecting…" : "Disconnect"}
-      </Button>
+      <ConfirmButton
+        label={disconnecting ? "Disconnecting…" : "Disconnect"}
+        confirmLabel="Disconnect Frame.io"
+        onconfirm={disconnect}
+        disabled={disconnecting}
+        class="border border-border text-text"
+      />
     {:else if frameioConfig.configured}
-      <p class="text-sm text-muted">Connect your Frame.io account to create destinations and sync rules.</p>
+      <p class="text-sm text-muted">Connect your Frame.io account to create links and sync rules.</p>
       <a href="/api/frameio/oauth/connect" data-sveltekit-reload class="inline-flex items-center justify-center gap-1.5 rounded-md bg-accent px-4 py-2 text-sm font-medium text-on-accent hover:bg-accent-hover">
         Connect Frame.io
       </a>
@@ -551,7 +549,7 @@
                   {#if pk.last_used_at}· last used {new Date(pk.last_used_at).toLocaleDateString()}{/if}
                 </div>
               </div>
-              <button onclick={() => removePasskey(pk.id)} class="text-xs text-faint hover:text-danger">Remove</button>
+              <ConfirmButton label="Remove" confirmLabel="Remove passkey" onconfirm={() => removePasskey(pk.id)} />
             </li>
           {/each}
         </ul>
@@ -592,7 +590,7 @@
           <input type="file" accept="image/png,.png" class="hidden" onchange={uploadLogo} disabled={logoBusy} />
         </label>
         {#if branding.has_logo}
-          <button onclick={removeLogo} class="ml-2 text-xs text-faint hover:text-danger">Remove</button>
+          <ConfirmButton label="Remove" confirmLabel="Remove logo" onconfirm={removeLogo} class="ml-2" />
         {/if}
         {#if logoError}<p class="text-xs text-danger">{logoError}</p>{/if}
       </div>
@@ -620,9 +618,13 @@
           <option value="anonymize">Anonymise (keep stats)</option>
           <option value="delete">Hard delete</option>
         </select>
-        <Button size="sm" variant="danger" onclick={eraseSubject} disabled={dsarBusy || !subjectEmail.trim()}>
-          Erase data
-        </Button>
+        <ConfirmButton
+          label="Erase data"
+          confirmLabel={eraseMode === "delete" ? "Delete everything for this email" : "Anonymise everything for this email"}
+          onconfirm={eraseSubject}
+          disabled={dsarBusy || !subjectEmail.trim()}
+          class="border border-border text-danger"
+        />
       </div>
     </div>
     {#if dsarResult}<p class="text-sm {dsarResult.ok ? 'text-success' : 'text-danger'}">{dsarResult.msg}</p>{/if}

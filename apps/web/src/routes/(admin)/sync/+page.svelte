@@ -1,216 +1,276 @@
 <script lang="ts">
   import { invalidateAll } from "$app/navigation";
-  import { Button, PathBreadcrumb, StatusPill } from "$lib/components";
-  import type { Destination, SyncRule } from "./+page";
+  import { ConfirmButton, Icon } from "$lib/components";
+  import { crumbNames } from "$lib/frameio";
+  import { formatBytes } from "$lib/format";
+  import { refreshOnChange } from "$lib/live.svelte";
+  import { timeAgo, whenFull } from "$lib/links";
+  import { errorDetail, toast } from "$lib/toast.svelte";
+  import type { SyncRule } from "./+page";
+  import type { SyncJob } from "../sync-rules/[id]/+page";
 
   let { data } = $props();
-  const destinations = $derived(data.destinations as Destination[]);
   const rules = $derived(data.rules as SyncRule[]);
 
+  $effect(() => refreshOnChange(20_000));
+
+  const base = (p: string | null | undefined) => (p ?? "").split("/").pop() || p || "";
+
+  type Tone = "live" | "ok" | "muted" | "warn" | "bad" | "wait";
+  function ruleStatus(r: SyncRule): { tone: Tone; text: string; title?: string } {
+    if (!r.enabled) return { tone: "muted", text: "Paused" };
+    const a = r.activity;
+    const c = a?.counts ?? {};
+    if (c.running) return { tone: "live", text: a?.running_file ? `Copying ${base(a.running_file)}` : "Copying", title: a?.running_file ?? undefined };
+    if (c.pending) return { tone: "live", text: `${c.pending} file${c.pending === 1 ? "" : "s"} queued` };
+    if (c.dead_letter) return { tone: "bad", text: `${c.dead_letter} failed`, title: a?.failed_file ?? undefined };
+    if (c.waiting)
+      return c.waiting === 1 && a?.waiting_file
+        ? { tone: "wait", text: `Waiting · ${base(a.waiting_file)} not ready on Frame.io yet`, title: a.waiting_file }
+        : { tone: "wait", text: `Waiting for ${c.waiting} files to finish on Frame.io` };
+    if (!r.subscription_active) return { tone: "warn", text: "Watching, checks on a timer", title: "The Frame.io webhook is missing; new files are picked up by the periodic check instead of right away." };
+    return { tone: "ok", text: "Watching" };
+  }
+  const tone: Record<Tone, string> = {
+    live: "text-text",
+    ok: "text-body",
+    muted: "text-muted",
+    warn: "text-warning",
+    bad: "text-danger",
+    wait: "text-info",
+  };
+  const dot: Record<Exclude<Tone, "live">, string> = { ok: "bg-success", muted: "bg-faint", warn: "bg-warning", bad: "bg-danger", wait: "bg-info" };
+
   let busy = $state<string | null>(null);
-  let note = $state<string | null>(null);
-  let deleting = $state<string | null>(null);
-
-  const ruleById = $derived(new Map(rules.map((r) => [r.id, r])));
-  // Rules not covering any destination still need a home on this page.
-  const otherRules = $derived.by(() => {
-    const covered = new Set(destinations.flatMap((d) => d.sync_rules.map((sr) => sr.id)));
-    return rules.filter((r) => !covered.has(r.id));
-  });
-
-  function destPath(dest: Destination): { id?: string; name: string }[] {
-    if (dest.config.path?.length) return dest.config.path;
-    return [{ name: dest.config.folder_name ?? dest.config.folder_id ?? "folder" }];
-  }
-  function rulePath(r: SyncRule): { id?: string; name: string }[] {
-    if (r.source.path?.length) return r.source.path;
-    const segs: { name: string }[] = [];
-    if (r.source.project_name) segs.push({ name: r.source.project_name });
-    segs.push({ name: r.source.folder_name ?? r.source.folder_id ?? "folder" });
-    return segs;
-  }
-
-  async function removeDestination(id: string, name: string) {
-    if (!confirm(`Delete destination "${name}"? Upload links using it will also be removed.`)) return;
-    deleting = id;
-    try {
-      await fetch(`/api/destinations/${id}`, { method: "DELETE" });
-      await invalidateAll();
-    } finally { deleting = null; }
-  }
 
   async function run(r: SyncRule) {
-    busy = r.id; note = null;
+    busy = r.id;
     try {
       const res = await fetch(`/api/sync-rules/${r.id}/run`, { method: "POST" });
-      if (!res.ok) {
-        note = `Could not run (${res.status}).`;
-      } else {
-        const created = (await res.json().catch(() => ({}))).created ?? 0;
-        // A disabled rule reconciles to 0 without looking at anything, so don't pass that off as
-        // "already up to date" — that reads as success when nothing happened at all.
-        note = !r.enabled
-          ? `"${r.name}" is disabled — enable it to sync.`
+      if (!res.ok) return toast(await errorDetail(res, "Could not check now"), { kind: "error" });
+      const created = (await res.json().catch(() => ({}))).created ?? 0;
+      toast(
+        !r.enabled
+          ? `“${r.name}” is paused. Resume it to sync.`
           : created > 0
-            ? `Queued ${created} file${created === 1 ? "" : "s"} for "${r.name}".`
-            : `"${r.name}" is already up to date — nothing new to sync.`;
-        await invalidateAll();
-      }
-    } finally { busy = null; }
+            ? `Queued ${created} file${created === 1 ? "" : "s"} from “${r.name}”`
+            : `“${r.name}” is up to date`,
+        { kind: created > 0 ? "ok" : "info" },
+      );
+      await invalidateAll();
+    } finally {
+      busy = null;
+    }
   }
 
-  async function toggle(r: SyncRule) {
-    busy = r.id; note = null;
+  async function setEnabled(r: SyncRule, enabled: boolean) {
+    busy = r.id;
     try {
       const res = await fetch(`/api/sync-rules/${r.id}`, {
-        method: "PATCH", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ enabled: !r.enabled }),
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled }),
       });
-      if (!res.ok) note = (await res.json().catch(() => ({}))).detail ?? `Could not update (${res.status}).`;
-      else await invalidateAll();
-    } finally { busy = null; }
+      if (!res.ok) return toast(await errorDetail(res, "Could not update"), { kind: "error" });
+      toast(enabled ? `“${r.name}” is watching again` : `Paused “${r.name}”`);
+      await invalidateAll();
+    } finally {
+      busy = null;
+    }
   }
 
-  async function removeRule(r: SyncRule) {
-    if (!confirm(`Delete sync rule "${r.name}"? Its webhook and job history will be removed.`)) return;
-    deleting = r.id; note = null;
-    try {
-      const res = await fetch(`/api/sync-rules/${r.id}`, { method: "DELETE" });
-      if (!res.ok) note = (await res.json().catch(() => ({}))).detail ?? `Could not delete (${res.status}).`;
-      else await invalidateAll();
-    } finally { deleting = null; }
+  async function remove(r: SyncRule) {
+    const res = await fetch(`/api/sync-rules/${r.id}`, { method: "DELETE" });
+    if (!res.ok) return toast(await errorDetail(res, "Could not delete"), { kind: "error" });
+    toast(`Deleted “${r.name}”. Files already on the NAS stay there.`);
+    await invalidateAll();
   }
+
+  // ── expanded rows: recent files ─────────────────────────────────────────
+  let open = $state(new Set<string>());
+  let jobs = $state<Record<string, SyncJob[] | "error">>({});
+
+  async function loadJobs(id: string) {
+    const res = await fetch(`/api/sync-rules/${id}/jobs?limit=15`);
+    jobs[id] = res.ok ? await res.json() : "error";
+  }
+  function toggle(r: SyncRule) {
+    const next = new Set(open);
+    if (next.has(r.id)) next.delete(r.id);
+    else {
+      next.add(r.id);
+      void loadJobs(r.id);
+    }
+    open = next;
+  }
+  let lastRules: SyncRule[] | null = null;
+  $effect(() => {
+    if (rules !== lastRules) {
+      lastRules = rules;
+      for (const id of open) void loadJobs(id);
+    }
+  });
+
+  async function jobAction(ruleId: string, id: string, action: "retry" | "dismiss") {
+    const res = await fetch(`/api/sync-jobs/${id}/${action}`, { method: "POST" });
+    if (!res.ok) return toast(await errorDetail(res, `Could not ${action}`), { kind: "error" });
+    toast(action === "retry" ? "Trying that file again" : "Dismissed");
+    await loadJobs(ruleId);
+    await invalidateAll();
+  }
+
+  const jobLabel: Record<string, string> = {
+    done: "Copied",
+    pending: "Queued",
+    running: "Copying",
+    waiting: "Waiting on Frame.io",
+    skipped: "Skipped",
+    dead_letter: "Failed",
+  };
+  const jobTone: Record<string, string> = {
+    done: "text-muted",
+    pending: "text-body",
+    running: "text-accent-hover",
+    waiting: "text-info",
+    skipped: "text-faint",
+    dead_letter: "text-danger",
+  };
+
+  const grid =
+    "grid items-center gap-x-3.5 grid-cols-[minmax(0,1fr)_auto] md:grid-cols-[minmax(0,1fr)_minmax(150px,0.9fr)_auto] lg:grid-cols-[minmax(0,1.5fr)_minmax(170px,1fr)_100px_110px_auto]";
 </script>
 
-{#snippet ruleRow(r: SyncRule, exact: boolean | null, showSource: boolean)}
-  <div class="group flex items-start justify-between gap-3 px-4 py-2.5 hover:bg-surface-2 transition-colors">
-    <div class="min-w-0 flex-1">
-      <div class="flex flex-wrap items-center gap-2">
-        <a href="/sync-rules/{r.id}" class="truncate text-sm font-medium hover:text-accent">{r.name}</a>
-        {#if r.enabled}
-          <StatusPill status="ok" label={r.subscription_active ? "enabled" : "enabled (no webhook)"} />
-        {:else}
-          <StatusPill status="revoked" label="disabled" />
-        {/if}
-        {#if exact === false}
-          <span class="text-xs text-faint">via parent folder</span>
-        {/if}
-      </div>
-      {#if showSource}
-        <div class="mt-0.5 text-xs">
-          <PathBreadcrumb segments={rulePath(r)} class="text-xs" />
-          {#if r.source.recursive ?? true}<span class="text-faint"> (recursive)</span>{/if}
-        </div>
-      {/if}
-      <div class="mt-0.5 truncate text-xs">
-        <span class="text-faint">→</span>
-        <PathBreadcrumb segments={[{ name: r.destination_path }]} variant="local" class="text-xs" />
-      </div>
-    </div>
-    <div class="flex shrink-0 flex-wrap items-center justify-end gap-1.5 opacity-100 transition-opacity sm:opacity-0 sm:group-hover:opacity-100">
-      <Button variant="ghost" size="sm" onclick={() => run(r)} disabled={busy === r.id}>Run</Button>
-      <Button variant="ghost" size="sm" onclick={() => toggle(r)} disabled={busy === r.id}>
-        {r.enabled ? "Disable" : "Enable"}
-      </Button>
-      <a href="/sync-rules/{r.id}" class="text-xs text-muted hover:text-text">Edit</a>
-      <button onclick={() => removeRule(r)} disabled={deleting === r.id} class="text-xs text-danger hover:opacity-80 disabled:opacity-50">
-        {deleting === r.id ? "Deleting…" : "Delete"}
-      </button>
-    </div>
+<div class="space-y-4 text-[13px]">
+  <div class="flex items-center gap-3">
+    <h1 class="text-xl font-semibold tracking-tight">Sync</h1>
+    <span class="flex-1"></span>
+    <a href="/sync-rules/new" class="inline-flex h-8 items-center gap-1.5 rounded-md bg-accent px-3 font-medium text-on-accent hover:bg-accent-hover"><Icon name="plus" size={15} />New sync rule</a>
   </div>
-{/snippet}
+  <p class="max-w-3xl text-muted">Each rule copies new files from a Frame.io folder to the NAS, once. Nothing is ever deleted on either side, and files you move or rename on the NAS stay where you put them.</p>
 
-<div class="space-y-5">
-  <div class="flex flex-wrap items-start justify-between gap-4">
-    <h1 class="min-w-0 text-xl font-semibold tracking-tight">Destinations</h1>
-    <div class="flex flex-wrap items-center gap-2">
-      <Button href="/sync-rules/new" variant="ghost">New sync rule</Button>
-      <Button href="/destinations/new">New destination</Button>
-    </div>
-  </div>
-
-  {#if note}<p class="rounded-md bg-surface-2 px-3 py-2 text-sm text-muted">{note}</p>{/if}
-
-  {#if destinations.length === 0}
-    <div class="rounded-card border border-border bg-surface px-5 py-12 text-center shadow-sm">
-      <p class="text-sm text-muted">No destinations yet. A destination is the Frame.io folder your upload links deliver into.</p>
-      <Button href="/destinations/new" size="sm" class="mt-3">Create one</Button>
-    </div>
+  {#if data.failed}
+    <p class="rounded-md bg-danger/10 px-3 py-2 text-danger">Could not load sync rules. Refresh to try again.</p>
   {/if}
 
-  {#each destinations as dest (dest.id)}
-    <div class="rounded-card border border-border bg-surface shadow-sm">
-      <div class="flex flex-wrap items-start justify-between gap-3 border-b border-border px-5 py-3.5">
-        <div class="min-w-0 flex-1">
-          <div class="flex flex-wrap items-center gap-2">
-            <a href="/destinations/{dest.id}" class="truncate font-semibold text-sm hover:text-accent">{dest.display_name}</a>
-            {#if dest.sync_rules.some((sr) => sr.enabled)}
-              <StatusPill status="ok" label="synced" />
+  <div>
+    <div class="{grid} h-8 border-b border-border px-3 text-[11.5px] font-medium text-faint">
+      <span>Rule</span>
+      <span class="hidden md:block">Status</span>
+      <span class="hidden text-right lg:block">Files</span>
+      <span class="hidden lg:block">Last copy</span>
+      <span></span>
+    </div>
+
+    {#each rules as r (r.id)}
+      {@const st = ruleStatus(r)}
+      {@const c = r.activity?.counts ?? {}}
+      {@const isOpen = open.has(r.id)}
+      <div class="border-b border-border {isOpen ? 'bg-surface/60' : ''} {r.enabled ? '' : 'opacity-75'}">
+        <div
+          class="{grid} min-h-[60px] cursor-pointer px-3 py-2 hover:bg-white/[0.02]"
+          role="button"
+          tabindex="0"
+          aria-expanded={isOpen}
+          onclick={() => toggle(r)}
+          onkeydown={(e) => {
+            if ((e.key === "Enter" || e.key === " ") && e.target === e.currentTarget) {
+              e.preventDefault();
+              toggle(r);
+            }
+          }}
+        >
+          <div class="flex min-w-0 items-center gap-3">
+            <div class="grid h-[30px] w-[30px] shrink-0 place-items-center rounded-md border border-border bg-surface-2 text-body"><Icon name="sync" /></div>
+            <div class="min-w-0">
+              <div class="truncate font-medium text-text">{r.name}</div>
+              <div class="flex min-w-0 items-center gap-1.5 text-xs text-faint">
+                <span class="truncate">{crumbNames(r.source as never).join(" / ")}{(r.source.recursive ?? true) ? "" : " (this folder only)"}</span>
+                <span class="shrink-0"><Icon name="move" size={13} /></span>
+                <span class="truncate font-mono text-[11px] text-muted">{r.destination_path}</span>
+              </div>
+              <div class="mt-1 truncate text-xs md:hidden {tone[st.tone]}">{st.text}</div>
+            </div>
+          </div>
+
+          <div class="hidden min-w-0 md:block">
+            <span class="inline-flex max-w-full items-center gap-2 text-[12.5px] {tone[st.tone]}" title={st.title}>
+              {#if st.tone === "live"}<span class="live-dot"></span>{:else}<span class="h-[7px] w-[7px] shrink-0 rounded-full {dot[st.tone]}"></span>{/if}
+              <span class="truncate">{st.text}</span>
+            </span>
+          </div>
+
+          <div class="tnum hidden text-right lg:block">
+            <span class="text-body">{c.done ?? 0}</span>
+            {#if r.activity?.bytes_done}<small class="block text-xs text-faint">{formatBytes(r.activity.bytes_done)}</small>{/if}
+          </div>
+
+          <div class="hidden min-w-0 lg:block">
+            {#if r.activity?.last_done_at}
+              <span class="text-body" title={whenFull(r.activity.last_done_at)}>{timeAgo(r.activity.last_done_at)}</span>
+              <small class="block truncate text-xs text-faint" title={r.activity.last_done_file ?? ""}>{base(r.activity.last_done_file)}</small>
             {:else}
-              <StatusPill status="revoked" label="not synced" />
+              <span class="text-faint">—</span>
             {/if}
           </div>
-          {#if dest.subtitle}<div class="mt-0.5 truncate text-xs text-muted">{dest.subtitle}</div>{/if}
-          <div class="mt-1 text-xs">
-            <PathBreadcrumb segments={destPath(dest)} class="text-xs" />
-          </div>
-        </div>
-        <div class="flex shrink-0 items-center gap-2">
-          <a href="/destinations/{dest.id}" class="text-xs text-muted hover:text-text">Edit</a>
-          <button onclick={() => removeDestination(dest.id, dest.display_name)} disabled={deleting === dest.id} class="text-xs text-danger hover:opacity-80 disabled:opacity-50">
-            {deleting === dest.id ? "Deleting…" : "Delete"}
-          </button>
-        </div>
-      </div>
 
-      <div class="grid divide-y divide-border/60 lg:grid-cols-2 lg:divide-x lg:divide-y-0">
-        <!-- Upload links into this folder -->
-        <div class="py-1.5">
-          <div class="flex items-center justify-between px-4 pb-1 pt-1.5">
-            <span class="text-xs font-medium uppercase tracking-wide text-faint">Upload links</span>
-            <a href="/links/new?type=upload&destination={dest.id}" class="text-xs text-accent hover:underline">+ Upload link</a>
+          <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+          <div class="flex items-center justify-end gap-0.5" onclick={(e) => e.stopPropagation()}>
+            <button type="button" class="grid h-7 w-7 place-items-center rounded-md text-faint hover:bg-surface-3 hover:text-text disabled:opacity-40" title="Check for new files now" aria-label="Check {r.name} now" disabled={busy === r.id} onclick={() => run(r)}><Icon name="retry" /></button>
+            <button type="button" class="grid h-7 w-7 place-items-center rounded-md text-faint hover:bg-surface-3 hover:text-text disabled:opacity-40" title={r.enabled ? "Pause" : "Resume"} aria-label={r.enabled ? `Pause ${r.name}` : `Resume ${r.name}`} disabled={busy === r.id} onclick={() => setEnabled(r, !r.enabled)}>
+              <Icon name={r.enabled ? "pause" : "play"} />
+            </button>
+            <a href="/sync-rules/{r.id}" class="grid h-7 w-7 place-items-center rounded-md text-faint hover:bg-surface-3 hover:text-text" title="Edit" aria-label="Edit {r.name}"><Icon name="pencil" /></a>
+            <ConfirmButton label="Delete rule" confirmLabel="Delete" icon="trash" onconfirm={() => remove(r)} />
           </div>
-          {#if dest.upload_links.length === 0}
-            <p class="px-4 py-2 text-xs text-faint">No upload links deliver here yet.</p>
-          {:else}
-            {#each dest.upload_links as link (link.id)}
-              <div class="flex items-center justify-between gap-3 px-4 py-1.5 hover:bg-surface-2 transition-colors">
-                <a href="/upload-links/{link.id}" class="truncate text-sm hover:text-accent">{link.label}</a>
-                <StatusPill status={link.state} />
+        </div>
+
+        {#if isOpen}
+          {@const list = jobs[r.id]}
+          <div class="px-3 pb-4 md:pl-[54px]">
+            <div class="overflow-hidden rounded-lg border border-border bg-surface">
+              <div class="flex items-center gap-3 border-b border-border px-3 py-2 text-[11.5px] font-medium text-faint">
+                <span class="flex-1">Recent files</span>
+                <span class="tnum">{[["done", "copied"], ["waiting", "waiting"], ["dead_letter", "failed"], ["skipped", "skipped"]].filter(([k]) => c[k as keyof typeof c]).map(([k, l]) => `${c[k as keyof typeof c]} ${l}`).join(" · ")}</span>
+                <a href="/sync-rules/{r.id}" class="text-muted hover:text-text">All files</a>
               </div>
-            {/each}
-          {/if}
-        </div>
-
-        <!-- Sync coverage -->
-        <div class="py-1.5">
-          <div class="flex items-center justify-between px-4 pb-1 pt-1.5">
-            <span class="text-xs font-medium uppercase tracking-wide text-faint">Sync to local storage</span>
-            <a href="/sync-rules/new?destination={dest.id}" class="text-xs text-accent hover:underline">+ Sync rule</a>
+              {#if !list}
+                <div class="px-3 py-3 text-faint">Loading…</div>
+              {:else if list === "error"}
+                <div class="px-3 py-3 text-danger">Could not load files.</div>
+              {:else}
+                {#each list as j (j.id)}
+                  <div class="border-b border-border px-3 py-1.5 text-xs last:border-b-0">
+                    <div class="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 sm:grid-cols-[minmax(0,1fr)_72px_140px_auto]">
+                      <span class="truncate text-text" title={j.file_name ?? j.frameio_file_id}>{j.file_name ?? j.frameio_file_id}</span>
+                      <span class="tnum hidden text-right text-muted sm:block">{j.bytes != null ? formatBytes(j.bytes) : ""}</span>
+                      <span class="hidden truncate sm:block {jobTone[j.status] ?? 'text-muted'}">{jobLabel[j.status] ?? j.status}{j.retry_count > 0 ? ` · ${j.retry_count} retr${j.retry_count === 1 ? "y" : "ies"}` : ""}</span>
+                      <span class="flex items-center justify-end gap-2 text-faint">
+                        {#if j.status === "dead_letter"}
+                          <button type="button" class="font-medium text-text hover:underline" onclick={() => jobAction(r.id, j.id, "retry")}>Retry</button>
+                          <button type="button" class="hover:text-text" onclick={() => jobAction(r.id, j.id, "dismiss")}>Dismiss</button>
+                        {:else}
+                          <span title={whenFull(j.completed_at ?? j.created_at)}>{timeAgo(j.completed_at ?? j.started_at ?? j.created_at)}</span>
+                        {/if}
+                      </span>
+                    </div>
+                    {#if j.error && j.status !== "done"}<div class="mt-0.5 truncate {j.status === 'dead_letter' ? 'text-danger' : 'text-faint'}" title={j.error}>{j.error}</div>{/if}
+                  </div>
+                {:else}
+                  <div class="px-3 py-3 text-faint">No files yet. New files in the folder show up here.</div>
+                {/each}
+              {/if}
+            </div>
           </div>
-          {#if dest.sync_rules.length === 0}
-            <p class="px-4 py-2 text-xs text-faint">Not synced — files stay in Frame.io only.</p>
-          {:else}
-            {#each dest.sync_rules as sr (sr.id)}
-              {@const r = ruleById.get(sr.id)}
-              {#if r}{@render ruleRow(r, sr.exact, false)}{/if}
-            {/each}
-          {/if}
+        {/if}
+      </div>
+    {:else}
+      {#if !data.failed}
+        <div class="py-16 text-center">
+          <div class="mx-auto mb-3 grid h-11 w-11 place-items-center rounded-xl border border-border bg-surface text-faint"><Icon name="sync" size={22} /></div>
+          <div class="text-sm font-medium text-text">No sync rules</div>
+          <p class="mt-1 text-muted">A rule copies a Frame.io folder's new files to the NAS. <a href="/sync-rules/new" class="text-accent-hover hover:underline">Create one</a>.</p>
         </div>
-      </div>
-    </div>
-  {/each}
-
-  {#if otherRules.length > 0}
-    <div class="rounded-card border border-border bg-surface shadow-sm">
-      <div class="border-b border-border px-5 py-3.5">
-        <h2 class="text-sm font-semibold">Other sync rules</h2>
-      </div>
-      <div class="divide-y divide-border/60">
-        {#each otherRules as r (r.id)}
-          {@render ruleRow(r, null, true)}
-        {/each}
-      </div>
-    </div>
-  {/if}
+      {/if}
+    {/each}
+  </div>
 </div>

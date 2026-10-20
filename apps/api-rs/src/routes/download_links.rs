@@ -11,7 +11,7 @@ use sqlx::Row;
 use crate::auth::Admin;
 use crate::state::AppState;
 
-fn link_state(revoked_at: Option<DateTime<Utc>>, expires_at: Option<DateTime<Utc>>) -> &'static str {
+pub fn link_state(revoked_at: Option<DateTime<Utc>>, expires_at: Option<DateTime<Utc>>) -> &'static str {
     if revoked_at.is_some() {
         return "revoked";
     }
@@ -61,13 +61,24 @@ fn generate_token() -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
 
-const LINK_COLUMNS: &str = "SELECT id, token, source, expires_at, password_hash, max_downloads,
+pub const LINK_COLUMNS: &str = "SELECT id, token, name, source, expires_at, password_hash, max_downloads,
         downloads_count, viewer_fields_required, verify_email, allow_preview, brand_display_name,
         brand_subtitle, revoked_at, created_at
    FROM download_links";
 
-fn render_row(state: &AppState, row: &sqlx::postgres::PgRow) -> Value {
+/// The name the admin sees: its own, else the client-facing title, else what it shares.
+pub fn effective_name(name: Option<String>, brand: Option<String>, source: &Value) -> String {
+    let nonempty = |v: Option<String>| v.filter(|s| !s.trim().is_empty());
+    nonempty(name)
+        .or_else(|| nonempty(brand))
+        .or_else(|| source.get("label").and_then(|v| v.as_str()).map(|s| s.to_string()))
+        .unwrap_or_else(|| generic_label(source))
+}
+
+pub fn render_row(state: &AppState, row: &sqlx::postgres::PgRow) -> Value {
     let token: String = row.get("token");
+    let source: Value = row.get("source");
+    let brand: Option<String> = row.get("brand_display_name");
     let expires_at: Option<DateTime<Utc>> = row.get("expires_at");
     let revoked_at: Option<DateTime<Utc>> = row.get("revoked_at");
     let created_at: DateTime<Utc> = row.get("created_at");
@@ -78,10 +89,12 @@ fn render_row(state: &AppState, row: &sqlx::postgres::PgRow) -> Value {
     let base = state.settings.base_url.trim_end_matches('/');
     json!({
         "id": row.get::<uuid::Uuid, _>("id").to_string(),
+        "kind": "download",
+        "name": effective_name(row.get("name"), brand.clone(), &source),
         "token": token,
         "public_url": format!("{base}/d/{token}"),
         "state": link_state(revoked_at, expires_at),
-        "source": row.get::<Value, _>("source"),
+        "source": source,
         "expires_at": expires_at.map(|d| crate::pyfmt::iso(&d)),
         "password_protected": row.get::<Option<String>, _>("password_hash").is_some(),
         "max_downloads": row.get::<Option<i32>, _>("max_downloads"),
@@ -89,11 +102,16 @@ fn render_row(state: &AppState, row: &sqlx::postgres::PgRow) -> Value {
         "viewer_fields_required": { "name": flag("name"), "email": flag("email") || verify_email },
         "verify_email": verify_email,
         "allow_preview": row.get::<bool, _>("allow_preview"),
-        "brand_display_name": row.get::<Option<String>, _>("brand_display_name"),
+        "brand_display_name": brand,
         "brand_subtitle": row.get::<Option<String>, _>("brand_subtitle"),
         "revoked_at": revoked_at.map(|d| crate::pyfmt::iso(&d)),
         "created_at": crate::pyfmt::iso(&created_at),
     })
+}
+
+fn str_or_none(v: Option<&Value>) -> Option<String> {
+    let s = v?.as_str()?.trim();
+    if s.is_empty() { None } else { Some(s.to_string()) }
 }
 
 async fn fetch_out(state: &AppState, id: uuid::Uuid) -> Option<Value> {
@@ -130,14 +148,17 @@ pub async fn create_link(State(state): State<AppState>, admin: Admin, Json(body)
     let password = body.get("password").and_then(|v| v.as_str()).filter(|p| !p.is_empty());
     let password_hash = password.and_then(|p| bcrypt::hash(p, bcrypt::DEFAULT_COST).ok());
     let token = generate_token();
+    let brand = str_or_none(body.get("brand_display_name"));
+    let name = effective_name(str_or_none(body.get("name")), brand.clone(), &source);
     let inserted = sqlx::query(
         // downloads_count has no DB default (SQLAlchemy sets it at the model level).
-        "INSERT INTO download_links (token, source, expires_at, password_hash, max_downloads,
+        "INSERT INTO download_links (token, name, source, expires_at, password_hash, max_downloads,
             viewer_fields_required, verify_email, allow_preview, brand_display_name, brand_subtitle,
             downloads_count)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,0) RETURNING id",
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,0) RETURNING id",
     )
     .bind(&token)
+    .bind(&name)
     .bind(&source)
     .bind(body.get("expires_at").and_then(|v| v.as_str()).and_then(|s| DateTime::parse_from_rfc3339(s).ok()).map(|d| d.with_timezone(&Utc)))
     .bind(password_hash)
@@ -145,7 +166,7 @@ pub async fn create_link(State(state): State<AppState>, admin: Admin, Json(body)
     .bind(&fields)
     .bind(verify_email)
     .bind(body.get("allow_preview").and_then(|v| v.as_bool()).unwrap_or(false))
-    .bind(body.get("brand_display_name").and_then(|v| v.as_str()).map(|s| s.to_string()))
+    .bind(brand)
     .bind(body.get("brand_subtitle").and_then(|v| v.as_str()).map(|s| s.to_string()))
     .fetch_one(&state.db)
     .await;
@@ -185,6 +206,10 @@ pub async fn update_link(State(state): State<AppState>, admin: Admin, axum::extr
         let hash = pw.and_then(|p| bcrypt::hash(p, bcrypt::DEFAULT_COST).ok());
         let _ = sqlx::query("UPDATE download_links SET password_hash = $1 WHERE id = $2").bind(hash).bind(id).execute(&state.db).await;
     }
+    if body.contains_key("name") {
+        let _ = sqlx::query("UPDATE download_links SET name = $1 WHERE id = $2")
+            .bind(str_or_none(body.get("name"))).bind(id).execute(&state.db).await;
+    }
     if body.contains_key("viewer_fields_required") {
         let _ = sqlx::query("UPDATE download_links SET viewer_fields_required = $1 WHERE id = $2")
             .bind(body.get("viewer_fields_required").cloned().unwrap_or(json!({})))
@@ -221,6 +246,18 @@ pub async fn revoke_link(State(state): State<AppState>, admin: Admin, axum::extr
     if already.is_none() {
         let _ = sqlx::query("UPDATE download_links SET revoked_at = now() WHERE id = $1").bind(id).execute(&state.db).await;
         let _ = sqlx::query("INSERT INTO audit_log (user_id, action, detail) VALUES ($1,'download_link.revoked',$2)")
+            .bind(admin.id).bind(json!({ "download_link_id": id.to_string() })).execute(&state.db).await;
+    }
+    match fetch_out(&state, id).await { Some(v) => Json(v).into_response(), None => not_found() }
+}
+
+/// `POST /api/download-links/{id}/restore` — undo a revoke.
+pub async fn restore_link(State(state): State<AppState>, admin: Admin, axum::extract::Path(id): axum::extract::Path<uuid::Uuid>) -> Response {
+    if fetch_out(&state, id).await.is_none() { return not_found(); }
+    let res = sqlx::query("UPDATE download_links SET revoked_at = NULL WHERE id = $1 AND revoked_at IS NOT NULL")
+        .bind(id).execute(&state.db).await;
+    if res.map(|r| r.rows_affected()).unwrap_or(0) > 0 {
+        let _ = sqlx::query("INSERT INTO audit_log (user_id, action, detail) VALUES ($1,'download_link.restored',$2)")
             .bind(admin.id).bind(json!({ "download_link_id": id.to_string() })).execute(&state.db).await;
     }
     match fetch_out(&state, id).await { Some(v) => Json(v).into_response(), None => not_found() }
@@ -275,61 +312,16 @@ pub async fn stats(State(state): State<AppState>, _: Admin, axum::extract::Path(
 }
 
 pub async fn list_links(State(state): State<AppState>, _: Admin) -> Response {
-    let rows = sqlx::query(
-        "SELECT id, token, source, expires_at, password_hash, max_downloads, downloads_count,
-                viewer_fields_required, verify_email, allow_preview, brand_display_name,
-                brand_subtitle, revoked_at, created_at
-           FROM download_links ORDER BY created_at DESC",
-    )
-    .fetch_all(&state.db)
-    .await;
-
-    let rows = match rows {
-        Ok(r) => r,
+    let rows = sqlx::query(sqlx::AssertSqlSafe(format!("{LINK_COLUMNS} ORDER BY created_at DESC")))
+        .fetch_all(&state.db)
+        .await;
+    match rows {
+        Ok(rows) => Json(Value::Array(rows.iter().map(|r| render_row(&state, r)).collect())).into_response(),
         Err(e) => {
             tracing::error!("download_links.list_failed: {e}");
-            return crate::error::detail(
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                "Internal server error",
-            );
+            crate::error::detail(axum::http::StatusCode::INTERNAL_SERVER_ERROR, "Internal server error")
         }
-    };
-
-    let base = state.settings.base_url.trim_end_matches('/').to_string();
-    let mut out: Vec<Value> = Vec::with_capacity(rows.len());
-    for row in rows {
-        let token: String = row.get("token");
-        let expires_at: Option<DateTime<Utc>> = row.get("expires_at");
-        let revoked_at: Option<DateTime<Utc>> = row.get("revoked_at");
-        let created_at: DateTime<Utc> = row.get("created_at");
-        let fields: Option<Value> = row.get("viewer_fields_required");
-        let fields = fields.unwrap_or_else(|| json!({}));
-        let verify_email: bool = row.get("verify_email");
-        let flag = |k: &str| fields.get(k).and_then(|v| v.as_bool()).unwrap_or(false);
-
-        out.push(json!({
-            "id": row.get::<uuid::Uuid, _>("id").to_string(),
-            "token": token,
-            "public_url": format!("{base}/d/{token}"),
-            "state": link_state(revoked_at, expires_at),
-            "source": row.get::<Value, _>("source"),
-            "expires_at": expires_at.map(|d| crate::pyfmt::iso(&d)),
-            "password_protected": row.get::<Option<String>, _>("password_hash").is_some(),
-            "max_downloads": row.get::<Option<i32>, _>("max_downloads"),
-            "downloads_count": row.get::<i32, _>("downloads_count"),
-            "viewer_fields_required": {
-                "name": flag("name"),
-                "email": flag("email") || verify_email,
-            },
-            "verify_email": verify_email,
-            "allow_preview": row.get::<bool, _>("allow_preview"),
-            "brand_display_name": row.get::<Option<String>, _>("brand_display_name"),
-            "brand_subtitle": row.get::<Option<String>, _>("brand_subtitle"),
-            "revoked_at": revoked_at.map(|d| crate::pyfmt::iso(&d)),
-            "created_at": crate::pyfmt::iso(&created_at),
-        }));
     }
-    Json(Value::Array(out)).into_response()
 }
 
 fn generic_label(source: &Value) -> String {

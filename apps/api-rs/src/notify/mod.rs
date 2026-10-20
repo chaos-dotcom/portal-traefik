@@ -262,6 +262,38 @@ pub async fn send_upload_receipt(config: &EmailConfig, to: &str, link_name: &str
     let _ = send_email(config, to, &subject, &text, Some(&html)).await; // already logged
 }
 
+/// The (subject, text, html) of a link sent to a client from the admin: what the link is for, the
+/// link itself, and an optional note from the sender.
+pub fn render_link_invite(kind: &str, title: &str, url: &str, note: Option<&str>, brand: &EmailBrand) -> (String, String, String) {
+    let (subject, lead, cta) = if kind == "download" {
+        (format!("{}: files for you", brand.name), format!("{} shared files with you: \"{title}\".", brand.name), "Open and download")
+    } else {
+        (format!("{}: send your files", brand.name), format!("{} asked you to upload files: \"{title}\".", brand.name), "Open and upload")
+    };
+    let mut lines = vec![lead.clone(), String::new()];
+    if let Some(n) = note.filter(|n| !n.trim().is_empty()) {
+        lines.push(n.trim().to_string());
+        lines.push(String::new());
+    }
+    lines.push(url.to_string());
+    let text = lines.join("\n");
+    let note_html = note
+        .filter(|n| !n.trim().is_empty())
+        .map(|n| format!("<p style=\"margin:0 0 16px;white-space:pre-line\">{}</p>", escape(n.trim())))
+        .unwrap_or_default();
+    let body_html = format!(
+        "<p style=\"margin:0 0 16px\">{}</p>{note_html}\
+<p style=\"margin:0 0 16px\"><a href=\"{url_esc}\" style=\"display:inline-block;background:{accent};color:#111111;\
+text-decoration:none;font-weight:600;padding:10px 18px;border-radius:8px\">{cta}</a></p>\
+<p style=\"margin:0;font-size:12px;color:#71717a;word-break:break-all\">{url_esc}</p>",
+        escape(&lead),
+        url_esc = escape(url),
+        accent = escape(&brand.accent_color),
+    );
+    let html = html_shell(brand, title, &body_html);
+    (subject, text, html)
+}
+
 pub async fn send_test_email(config: &EmailConfig, brand: &EmailBrand) -> Result<(), EmailError> {
     let text = "This is a test email from Portal. If you received it, SMTP is configured correctly.";
     let body_html = "<p style=\"margin:0\">This is a test email from Portal. If you received it, SMTP is configured correctly.</p>";
@@ -275,6 +307,26 @@ mod tests {
 
     fn brand() -> EmailBrand {
         EmailBrand { name: "Acme Post".into(), accent_color: "#ff8800".into(), logo_url: None }
+    }
+
+    #[test]
+    fn link_invite_carries_the_link_and_escapes_the_note() {
+        let (subject, text, html) = render_link_invite(
+            "upload",
+            "Send us your Day 3 cards",
+            "https://portal.example/u/abc",
+            Some("Cards <A001> & <A002>"),
+            &brand(),
+        );
+        assert_eq!(subject, "Acme Post: send your files");
+        assert!(text.contains("https://portal.example/u/abc"));
+        assert!(text.contains("Cards <A001> & <A002>"));
+        assert!(html.contains("href=\"https://portal.example/u/abc\""));
+        assert!(html.contains("Cards &lt;A001&gt; &amp; &lt;A002&gt;"));
+        assert!(!html.contains("<A001>"));
+        let (subject, _, html) = render_link_invite("download", "Grade v4", "https://portal.example/d/x", None, &brand());
+        assert_eq!(subject, "Acme Post: files for you");
+        assert!(html.contains("Open and download"));
     }
 
     #[test]

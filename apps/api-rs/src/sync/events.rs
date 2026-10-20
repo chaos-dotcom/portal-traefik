@@ -5,6 +5,7 @@ use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 use crate::frameio::webhooks::{parse_webhook_payload, SYNC_TRIGGER_EVENTS};
+use crate::services::sync_coverage::{load_rules, rules_covering, Rule};
 
 pub fn rule_matches(source_config: &serde_json::Value, payload: &crate::frameio::webhooks::WebhookPayload) -> bool {
     for (key, value) in [
@@ -138,26 +139,19 @@ pub async fn process_event(db: &PgPool, event_id: Uuid) -> Vec<Uuid> {
 /// never races a not-yet-visible job.
 pub async fn trigger_sync_for_upload(
     db: &PgPool,
-    account_id: &str,
-    folder_id: &str,
+    folder: &serde_json::Value,
     file_ids: &[String],
 ) -> Vec<Uuid> {
     if file_ids.is_empty() {
         return Vec::new();
     }
-    let rules = sqlx::query("SELECT id, source_config FROM sync_rules WHERE enabled")
-        .fetch_all(db)
-        .await
-        .unwrap_or_default();
+    let folder_id = folder.get("folder_id").and_then(|v| v.as_str()).unwrap_or("");
+    // Every enabled rule covering the link's folder: on the folder itself, or recursively on one
+    // of its parents (a link can deliver into a subfolder of what a rule watches).
+    let rules: Vec<Rule> = load_rules(db).await.into_iter().filter(|r| r.enabled).collect();
     let (mut created, mut woken) = (Vec::new(), Vec::new());
-    for r in rules {
-        let source: serde_json::Value = r.get("source_config");
-        if source.get("account_id").and_then(|v| v.as_str()) != Some(account_id)
-            || source.get("folder_id").and_then(|v| v.as_str()) != Some(folder_id)
-        {
-            continue;
-        }
-        let rule_id: Uuid = r.get("id");
+    for (rule, _) in rules_covering(folder, &rules) {
+        let rule_id = rule.id;
         for file_id in file_ids {
             match job_to_run(db, rule_id, file_id).await {
                 Ok(Some((id, true))) => created.push(id),
