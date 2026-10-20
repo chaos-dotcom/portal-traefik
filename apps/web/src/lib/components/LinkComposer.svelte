@@ -1,5 +1,15 @@
 <script lang="ts" module>
   export type Branding = { name: string | null; accent: string | null; logo_url: string | null };
+  export type BrandProfile = {
+    id: string;
+    name: string;
+    display_name: string | null;
+    accent_color: string | null;
+    has_logo: boolean;
+    logo_url: string | null;
+    links?: number;
+  };
+  export type Preset = { id: string; name: string; kind: "upload" | "download"; settings: Record<string, unknown> };
 
   // File-type groups for upload links. "Anything" stores no restriction at all.
   export const TYPE_GROUPS = {
@@ -42,6 +52,9 @@
     initialFolder = null,
     openSourcePicker = false,
     emailConfigured = true,
+    presets = [],
+    brands = [],
+    defaultNotify = null,
   }: {
     mode?: "create" | "edit";
     kind?: Kind;
@@ -52,6 +65,9 @@
     initialFolder?: FolderRef | null;
     openSourcePicker?: boolean;
     emailConfigured?: boolean;
+    presets?: Preset[];
+    brands?: BrandProfile[];
+    defaultNotify?: string | null;
   } = $props();
 
   const editing = $derived(mode === "edit");
@@ -81,6 +97,12 @@
   let maxDownloads = $state("");
   let preview = $state(true);
   let preset = $state("");
+  let brandProfileId = $state("");
+  let notifyEmails = $state("");
+  let remind = $state(false);
+  let savedPresets = $state<Preset[]>(untrack(() => [...presets]));
+  let presetNaming = $state(false);
+  let presetName = $state("");
   let moreOpen = $state(false);
   let sourceOpen = $state(false);
 
@@ -105,6 +127,9 @@
       pwMode = link.password_protected ? "keep" : "none";
       password = "";
       otp = link.verify_email;
+      brandProfileId = link.brand_profile_id ?? "";
+      notifyEmails = (link.notify_emails ?? []).join(", ");
+      remind = link.remind_before_expiry;
       if (link.kind === "upload") {
         folder = link.folder;
         askName = link.uploader_fields_required.name;
@@ -121,7 +146,7 @@
           customExt = ext.filter((e) => !known.has(e));
           if (!groups.length && !customExt.length) types = new Set(["any"]);
         }
-        maxSizeGb = link.max_file_size ? String(+(link.max_file_size / 1024 ** 3).toFixed(2)) : "";
+        maxSizeGb = link.max_file_size ? String(+(link.max_file_size / 1e9).toFixed(2)) : "";
         template = link.subfolder_template ?? "";
       } else {
         const s = link.source;
@@ -146,8 +171,12 @@
   // ── derived ─────────────────────────────────────────────────────────────
   const coverage = $derived(kind === "upload" ? coveringRules(folder, rules) : []);
   const enabledCoverage = $derived(coverage.filter((c) => c.enabled));
-  const accent = $derived(branding.accent || "#f59e0b");
-  const brandName = $derived(branding.name || "Portal");
+  // The page brand: the chosen profile, with the app-wide brand filling what it leaves empty
+  // (a profile's logo stands alone, as on the client page).
+  const profile = $derived(brands.find((b) => b.id === brandProfileId) ?? null);
+  const accent = $derived(profile?.accent_color || branding.accent || "#f59e0b");
+  const brandName = $derived(profile?.display_name || branding.name || "Portal");
+  const logoUrl = $derived(profile ? profile.logo_url : branding.logo_url);
 
   function endOfDay(days: number): Date {
     const d = new Date();
@@ -205,6 +234,7 @@
       ? [typesLabel, maxSizeGb ? `up to ${maxSizeGb} GB per file` : "no size limit", template.trim() ? "sorted into folders" : ""].filter(Boolean).join(" · ")
       : [maxDownloads ? `${maxDownloads} downloads max` : "unlimited downloads", preview ? "thumbnails on" : "thumbnails off"].join(" · "),
   );
+  const moreLine = $derived(notifyEmails.trim() ? `${moreSummary} · custom notifications` : moreSummary);
 
   // ── interactions ────────────────────────────────────────────────────────
   function setKind(k: Kind) {
@@ -253,28 +283,92 @@
     return `${pick()}-${pick()}-${10 + Math.floor(Math.random() * 90)}`;
   }
 
-  function applyPreset(p: string) {
-    if (p === "dailies") {
-      if (!editing) kind = "upload";
-      expiry = "7";
-      otp = true;
-      askName = true;
-      types = new Set(["video", "audio"]);
-      customExt = [];
-      template = "{date}/{uploader_name}";
-      toast("Dailies drop: 7 days, video and audio, email code, sorted by date and uploader");
-    } else if (p === "finals") {
-      if (!editing) kind = "download";
-      expiry = "30";
-      pwMode = pwMode === "keep" ? "keep" : "set";
-      if (pwMode === "set" && !password) password = passphrase();
-      otp = false;
-      preview = true;
-      toast("Final delivery: 30 days, password, thumbnails");
-      if (kind === "download" && !source) sourceOpen = true;
-    }
-    preset = "";
+  // ── presets ─────────────────────────────────────────────────────────────
+  // What a preset remembers: every option except where files go and the link's own name/title.
+  // A picked (or kept) date is remembered as so many days from today.
+  function presetExpiry(): string {
+    if (expiry !== "custom" && expiry !== "keep") return expiry;
+    const end = expiry === "keep" ? (link?.expires_at ? new Date(link.expires_at) : null) : (expiresAt as Date | null);
+    if (!end) return expiry === "keep" ? "never" : "7";
+    return String(Math.max(1, Math.round((end.getTime() - endOfDay(0).getTime()) / 86_400_000)));
   }
+  function snapshot(): Record<string, unknown> {
+    return {
+      expiry: presetExpiry(),
+      otp,
+      password: pwMode === "set" || pwMode === "keep",
+      ask: { name: askName, email: askEmail, message: askMessage },
+      subtitle: subtitle.trim(),
+      brand_profile_id: brandProfileId || null,
+      notify_emails: notifyEmails.trim(),
+      remind,
+      ...(kind === "upload"
+        ? { types: [...types], custom_ext: customExt, max_size_gb: maxSizeGb, template }
+        : { max_downloads: maxDownloads, allow_preview: preview }),
+    };
+  }
+
+  function applyPreset(id: string) {
+    preset = "";
+    if (id === "__save") {
+      presetNaming = true;
+      presetName = "";
+      return;
+    }
+    const p = savedPresets.find((x) => x.id === id);
+    if (!p) return;
+    const st = p.settings as Record<string, any>;
+    if (typeof st.expiry === "string") {
+      if (["1", "7", "30", "never"].includes(st.expiry)) expiry = st.expiry as Expiry;
+      else if (/^\d+$/.test(st.expiry)) {
+        const d = endOfDay(Number(st.expiry));
+        customDate = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+        expiry = "custom";
+      }
+    }
+    otp = !!st.otp;
+    if (st.password) {
+      if (pwMode !== "keep") {
+        pwMode = "set";
+        if (!password) password = passphrase();
+      }
+    } else if (pwMode === "set") {
+      pwMode = link?.password_protected ? "keep" : "none";
+    }
+    askName = !!st.ask?.name;
+    askEmail = !!st.ask?.email;
+    askMessage = !!st.ask?.message;
+    if (typeof st.subtitle === "string" && st.subtitle) subtitle = st.subtitle;
+    brandProfileId = typeof st.brand_profile_id === "string" && brands.some((b) => b.id === st.brand_profile_id) ? st.brand_profile_id : "";
+    notifyEmails = typeof st.notify_emails === "string" ? st.notify_emails : "";
+    remind = !!st.remind;
+    if (kind === "upload") {
+      if (Array.isArray(st.types) && st.types.length) types = new Set(st.types as (TypeGroup | "any")[]);
+      customExt = Array.isArray(st.custom_ext) ? (st.custom_ext as string[]) : [];
+      maxSizeGb = typeof st.max_size_gb === "string" ? st.max_size_gb : "";
+      template = typeof st.template === "string" ? st.template : "";
+    } else {
+      maxDownloads = typeof st.max_downloads === "string" ? st.max_downloads : "";
+      preview = st.allow_preview !== false;
+    }
+    toast(`Applied “${p.name}”`);
+  }
+
+  async function savePreset() {
+    const n = presetName.trim();
+    if (!n) return;
+    const res = await fetch("/api/link-presets", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: n, kind, settings: snapshot() }),
+    });
+    if (!res.ok) return toast(await errorDetail(res, "Could not save the preset"), { kind: "error" });
+    savedPresets = [...savedPresets, await res.json()];
+    presetNaming = false;
+    toast(`Saved “${n}”. Manage presets in Settings.`);
+  }
+
+  const kindPresets = $derived(savedPresets.filter((p) => p.kind === kind));
 
   // ── save ────────────────────────────────────────────────────────────────
   function body(): Record<string, unknown> {
@@ -283,6 +377,9 @@
       brand_display_name: title.trim() || null,
       brand_subtitle: subtitle.trim() || null,
       verify_email: otp,
+      brand_profile_id: brandProfileId || null,
+      notify_emails: notifyEmails.trim() || null,
+      remind_before_expiry: remind && expiry !== "never",
     };
     if (expiresAt !== "keep") b.expires_at = expiresAt ? expiresAt.toISOString() : null;
     if (pwMode === "set" && password) b.password = password;
@@ -291,7 +388,7 @@
       if (!editing || (folder && (folder.folder_id !== up?.folder?.folder_id || folder.account_id !== up?.folder?.account_id))) b.folder = folder;
       b.uploader_fields_required = { name: askName, email: askEmail || otp, message: askMessage };
       b.allowed_extensions = allowedExtensions;
-      b.max_file_size = maxSizeGb ? Math.round(parseFloat(maxSizeGb) * 1024 ** 3) : null;
+      b.max_file_size = maxSizeGb ? Math.round(parseFloat(maxSizeGb) * 1e9) : null;
       b.subfolder_template = template.trim() || null;
     } else {
       if (!editing || JSON.stringify(source?.source) !== JSON.stringify(down?.source)) b.source = source?.source;
@@ -505,7 +602,7 @@
         {#if kind === "upload"}
           <div class="{line} {editing ? 'border-t-0' : ''}">
             <div class={label}>Into</div>
-            <div class="grid min-w-0 gap-2">
+            <div class="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-2">
               <FolderField bind:value={folder} {recents} title="Receive into" chooseVerb="Use" onchange={onFolder} />
               {#if folder}
                 <div class="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-[12.5px] text-muted">
@@ -533,7 +630,7 @@
         {:else}
           <div class="{line} {editing ? 'border-t-0' : ''}">
             <div class={label}>Files</div>
-            <div class="grid min-w-0 gap-2">
+            <div class="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-2">
               <button type="button" onclick={() => (sourceOpen = true)} class="flex h-8 w-full min-w-0 items-center gap-1.5 rounded-md border border-border bg-bg pr-2 pl-2 text-left hover:border-border-strong">
                 <span class="text-faint"><Icon name={source?.source.type === "folder" ? "folder" : "file"} /></span>
                 {#if source}
@@ -545,10 +642,12 @@
                 <span class="text-faint"><Icon name="chevron" size={14} /></span>
               </button>
               {#if source}
-                <div class="flex items-center gap-2 text-[12.5px] text-muted">
-                  <span class="h-1.5 w-1.5 rounded-full bg-success"></span>
-                  {sourceSummary(source.source as DownloadLink["source"])}
-                  {#if source.source.type === "folder"}<span class="text-faint">· clients get what's in it when they open the link</span>{/if}
+                <div class="flex min-w-0 items-start gap-2 text-[12.5px] text-muted">
+                  <span class="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-success"></span>
+                  <span class="min-w-0 [overflow-wrap:anywhere]">
+                    {sourceSummary(source.source as DownloadLink["source"])}
+                    {#if source.source.type === "folder"}<span class="text-faint">· clients get what's in it when they open the link</span>{/if}
+                  </span>
                 </div>
               {/if}
             </div>
@@ -557,7 +656,7 @@
 
         <div class={line}>
           <div class={label}><label for="lc-name">Name</label></div>
-          <div class="grid gap-1.5">
+          <div class="grid grid-cols-[minmax(0,1fr)] gap-1.5">
             <input id="lc-name" class={input} bind:value={name} oninput={() => (nameTouched = true)} placeholder={kind === "upload" ? "e.g. Day 3 camera cards" : "e.g. Grade v4 selects"} autocomplete="off" />
             <div class="text-xs text-faint">Only you see this. It's how the link shows up in your list.</div>
           </div>
@@ -571,21 +670,40 @@
           </div>
         </div>
 
+        {#if brands.length}
+          <div class={line}>
+            <div class={label}><label for="lc-brand">Brand</label></div>
+            <div class="grid grid-cols-[minmax(0,1fr)] gap-1.5">
+              <select id="lc-brand" class="{input} max-w-72" bind:value={brandProfileId}>
+                <option value="">{branding.name ? `${branding.name} (default)` : "Default brand"}</option>
+                {#each brands as b (b.id)}<option value={b.id}>{b.name}</option>{/each}
+              </select>
+              <div class="text-xs text-faint">The logo, colour and name on the client's page and emails.</div>
+            </div>
+          </div>
+        {/if}
+
         <div class={line}>
           <div class={label}>Expires</div>
-          <div class="grid gap-2">
+          <div class="grid grid-cols-[minmax(0,1fr)] gap-2">
             <div class="flex flex-wrap gap-1.5" role="radiogroup" aria-label="Expiry">
               {#if editing && link?.expires_at}
-                <button type="button" class={chip(expiry === "keep")} onclick={() => (expiry = "keep")}>Keep {expiresText(link)}</button>
+                <button type="button" role="radio" aria-checked={expiry === "keep"} class={chip(expiry === "keep")} onclick={() => (expiry = "keep")}>Keep {expiresText(link)}</button>
               {/if}
               {#each [["1", "1 day"], ["7", "7 days"], ["30", "30 days"], ["never", "Never"], ["custom", "Pick a date…"]] as [v, l] (v)}
-                <button type="button" class={chip(expiry === v)} onclick={() => (expiry = v as Expiry)}>{l}</button>
+                <button type="button" role="radio" aria-checked={expiry === v} class={chip(expiry === v)} onclick={() => (expiry = v as Expiry)}>{l}</button>
               {/each}
             </div>
             {#if expiry === "custom"}
               <input type="date" class="{input} max-w-48" bind:value={customDate} aria-label="Last day" />
             {/if}
             <div class="text-xs text-faint">{expiryHelp}</div>
+            {#if expiry !== "never"}
+              <label class="flex items-center gap-2 text-muted">
+                <input type="checkbox" bind:checked={remind} />
+                Email me a day before it expires
+              </label>
+            {/if}
           </div>
         </div>
 
@@ -639,17 +757,17 @@
         <details class="border-t border-border" bind:open={moreOpen}>
           <summary class="flex cursor-pointer list-none items-center gap-1.5 py-3 font-medium text-muted hover:text-text [&::-webkit-details-marker]:hidden">
             <span class="inline-block w-3 transition-transform {moreOpen ? 'rotate-90' : ''}">›</span>
-            More options <span class="truncate font-normal text-faint">· {moreSummary}</span>
+            More options <span class="truncate font-normal text-faint">· {moreLine}</span>
           </summary>
           {#if kind === "upload"}
             <div class="{line} border-t-0 pt-1">
               <div class={label}>File types</div>
-              <div class="grid gap-2">
+              <div class="grid grid-cols-[minmax(0,1fr)] gap-2">
                 <div class="flex flex-wrap gap-1.5">
                   {#each Object.entries(TYPE_GROUPS) as [g, def] (g)}
-                    <button type="button" class={chip(types.has(g as TypeGroup))} onclick={() => toggleType(g as TypeGroup)}>{def.label}</button>
+                    <button type="button" aria-pressed={types.has(g as TypeGroup)} class={chip(types.has(g as TypeGroup))} onclick={() => toggleType(g as TypeGroup)}>{def.label}</button>
                   {/each}
-                  <button type="button" class={chip(types.has("any"))} onclick={() => toggleType("any")}>Anything</button>
+                  <button type="button" aria-pressed={types.has("any")} class={chip(types.has("any"))} onclick={() => toggleType("any")}>Anything</button>
                 </div>
                 <div class="text-xs text-faint">
                   {#if allowedExtensions}Accepts {allowedExtensions.map((e) => `.${e}`).join(" ")}{:else}Every file type is accepted.{/if}
@@ -665,7 +783,7 @@
             </div>
             <div class={line}>
               <div class={label}><label for="lc-tpl">Organize</label></div>
-              <div class="grid min-w-0 gap-2">
+              <div class="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-2">
                 <input id="lc-tpl" class="{input} font-mono text-xs" bind:value={template} placeholder={"e.g. {date}/{uploader_name}"} autocomplete="off" spellcheck="false" />
                 <div class="flex flex-wrap gap-1.5">
                   {#each UPLOAD_TOKENS as t (t.name)}
@@ -696,16 +814,43 @@
               </div>
             </div>
           {/if}
+          <!-- A send link emails nobody but the expiry reminder, so it only asks who when that's on. -->
+          {#if kind === "upload" || (remind && expiry !== "never")}
+            <div class={line}>
+              <div class={label}><label for="lc-notify">Notify</label></div>
+              <div class="grid grid-cols-[minmax(0,1fr)] gap-1.5">
+                <input id="lc-notify" class={input} bind:value={notifyEmails} placeholder={defaultNotify ? `${defaultNotify} (default)` : "you@example.com"} autocomplete="off" spellcheck="false" />
+                <div class="text-xs text-faint">
+                  {kind === "upload" ? "Who gets the email when an upload finishes" : "Who gets the expiry reminder"}{kind === "upload" && remind && expiry !== "never" ? " and the expiry reminder" : ""}. Separate several addresses with commas.
+                </div>
+              </div>
+            </div>
+          {/if}
         </details>
       </div>
 
       <div class="flex flex-wrap items-center gap-2 border-t border-border px-5 py-3.5 sm:px-7">
-        <label for="lc-preset" class="text-xs text-faint">Preset</label>
-        <select id="lc-preset" class="h-8 rounded-md border border-border bg-bg px-2 text-[13px]" bind:value={preset} onchange={() => applyPreset(preset)}>
-          <option value="">Apply…</option>
-          <option value="dailies">Dailies drop</option>
-          <option value="finals">Final delivery</option>
-        </select>
+        {#if presetNaming}
+          <input
+            class="h-8 w-48 rounded-md border border-border bg-bg px-2.5 text-[13px] outline-none focus:border-accent"
+            bind:value={presetName}
+            placeholder="Preset name"
+            aria-label="Preset name"
+            onkeydown={(e) => {
+              if (e.key === "Enter") void savePreset();
+              if (e.key === "Escape") presetNaming = false;
+            }}
+          />
+          <button type="button" class="h-8 rounded-md px-3 font-medium text-text hover:bg-surface-3 disabled:opacity-40" disabled={!presetName.trim()} onclick={savePreset}>Save</button>
+          <button type="button" class="h-8 rounded-md px-2 text-muted hover:text-text" onclick={() => (presetNaming = false)}>Cancel</button>
+        {:else}
+          <label for="lc-preset" class="text-xs text-faint">Preset</label>
+          <select id="lc-preset" class="h-8 max-w-56 rounded-md border border-border bg-bg px-2 text-[13px]" bind:value={preset} onchange={() => applyPreset(preset)}>
+            <option value="">{kindPresets.length ? "Apply…" : "None yet"}</option>
+            {#each kindPresets as p (p.id)}<option value={p.id}>{p.name}</option>{/each}
+            <option value="__save">Save these settings as a preset…</option>
+          </select>
+        {/if}
         <span class="flex-1"></span>
         {#if editing && link}
           {#if link.state !== "revoked"}
@@ -751,9 +896,9 @@
           <span class="truncate font-mono text-[10.5px] text-faint">…/{kind === "upload" ? "u" : "d"}/new-link</span>
         {/if}
       </div>
-      <div class="grid gap-2.5 px-6 pt-6 pb-5 text-center text-[12.5px]">
-        {#if branding.logo_url}
-          <img src={branding.logo_url} alt="" class="mx-auto mb-1 h-8 object-contain" />
+      <div class="grid grid-cols-[minmax(0,1fr)] gap-2.5 px-6 pt-6 pb-5 text-center text-[12.5px] [overflow-wrap:anywhere]">
+        {#if logoUrl}
+          <img src={logoUrl} alt="" class="mx-auto mb-1 h-8 max-w-full object-contain" />
         {:else}
           <div class="mb-1 text-[13px] font-bold tracking-[0.16em] text-text uppercase">{brandName}</div>
         {/if}
@@ -772,15 +917,15 @@
           </div>
           <div class="grid h-9 place-items-center rounded-md text-[13px] font-semibold" style="background:{accent};color:{accentText(accent)}">Upload</div>
         {:else}
-          <div class="grid gap-1.5 text-left">
+          <div class="grid grid-cols-[minmax(0,1fr)] gap-1.5 text-left">
             {#each previewFiles.length ? previewFiles : ["Your files appear here"] as f, i (i)}
-              <div class="flex items-center gap-2 rounded-md border border-border p-1.5">
+              <div class="flex min-w-0 items-center gap-2 rounded-md border border-border p-1.5">
                 {#if preview && previewFiles.length}
                   <span class="h-6 w-10 shrink-0 rounded bg-gradient-to-br from-[#3a2a1c] via-[#1e2f3a] to-[#0f1720]"></span>
                 {:else}
                   <span class="grid h-6 w-6 shrink-0 place-items-center rounded bg-surface-2 text-faint"><Icon name="file" size={13} /></span>
                 {/if}
-                <span class="min-w-0 flex-1 truncate {previewFiles.length ? 'text-text' : 'text-faint'}">{f}</span>
+                <span class="min-w-0 flex-1 text-left [overflow-wrap:anywhere] {previewFiles.length ? 'text-text' : 'text-faint'}">{f}</span>
               </div>
             {/each}
           </div>

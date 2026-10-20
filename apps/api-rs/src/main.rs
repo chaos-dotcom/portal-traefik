@@ -131,16 +131,19 @@ async fn main() -> anyhow::Result<()> {
         .route("/privacy/subject/erase", post(routes::privacy::erase_subject))
         .route("/dashboard/history", get(routes::dashboard::history))
         .route("/links", get(routes::links::list_links))
+        .route("/link-presets", get(routes::presets::list).post(routes::presets::create))
+        .route("/link-presets/{preset_id}", axum::routing::patch(routes::presets::update).delete(routes::presets::delete))
+        .route("/brand-profiles", get(routes::brands::list).post(routes::brands::create))
+        .route("/brand-profiles/{profile_id}", axum::routing::patch(routes::brands::update).delete(routes::brands::delete))
+        .route(
+            "/brand-profiles/{profile_id}/logo",
+            post(routes::brands::upload_logo)
+                .layer(axum::extract::DefaultBodyLimit::max(state.settings.branding_logo_max_bytes.saturating_mul(2).saturating_add(1 << 20)))
+                .delete(routes::brands::delete_logo),
+        )
         .route("/nav", get(routes::links::nav_summary))
         .route("/links/email", post(routes::links::email_link))
         .route("/events", get(routes::events::stream_events))
-        .route("/destinations", get(routes::destinations::list_destinations).post(routes::destinations::create_destination))
-        .route(
-            "/destinations/{id}",
-            get(routes::destinations::get_destination)
-                .patch(routes::destinations::update_destination)
-                .delete(routes::destinations::delete_destination),
-        )
         .route("/sync-rules", get(routes::sync_rules::list_rules).post(routes::sync_rules::create_rule))
         .route("/sync-rules/{rule_id}", get(routes::sync_rules::get_rule).patch(routes::sync_rules::update_rule).delete(routes::sync_rules::delete_rule))
         .route("/sync-rules/{rule_id}/run", post(routes::sync_rules::run_rule))

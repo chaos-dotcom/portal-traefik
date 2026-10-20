@@ -20,6 +20,9 @@ type LinkBase = {
   brand_subtitle: string | null;
   revoked_at: string | null;
   created_at: string;
+  brand_profile_id: string | null;
+  notify_emails: string[] | null;
+  remind_before_expiry: boolean;
 };
 
 export type UploadLink = LinkBase & {

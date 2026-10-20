@@ -24,33 +24,43 @@ pub struct TransfersQuery {
 #[derive(Deserialize)]
 pub struct HistoryQuery {
     kind: Option<String>,
+    q: Option<String>,
     limit: Option<i64>,
     offset: Option<i64>,
 }
 
-/// `GET /api/dashboard/history` — paginated merge of completed uploads and file downloads.
+/// `GET /api/dashboard/history` — paginated, newest-first merge of finished uploads, file
+/// downloads and NAS copies. `kind` = all | upload | download | sync; `q` searches names and people.
 pub async fn history(State(state): State<AppState>, _: Admin, Query(q): Query<HistoryQuery>) -> Response {
-    let limit = q.limit.unwrap_or(50).clamp(1, 200);
+    let limit = q.limit.unwrap_or(50).clamp(1, 1000);
     let offset = q.offset.unwrap_or(0).max(0);
     let kind = q.kind.unwrap_or_else(|| "all".to_string());
-    let want_upload = kind == "all" || kind == "upload";
-    let want_download = kind == "all" || kind == "download";
+    let want = |k: &str| kind == "all" || kind == k;
+    // ILIKE pattern, with the user's % and _ taken literally.
+    let pattern = q
+        .q
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .map(|s| format!("%{}%", s.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")));
     let take = offset + limit + 1;
     let mut pool: Vec<(DateTime<Utc>, Value)> = Vec::new();
 
-    if want_upload {
+    if want("upload") {
         let rows = sqlx::query(
             "SELECT s.id, s.uploader_name, s.uploader_email, s.uploaded_bytes, s.total_bytes,
                     s.status, s.started_at, s.completed_at, s.last_activity_at, s.created_at,
-                    s.frameio_asset_ids, COALESCE(NULLIF(l.name, ''), l.brand_display_name) AS brand_display_name
-               FROM upload_sessions s JOIN upload_links l ON s.upload_link_id = l.id
-              WHERE s.status = 'completed'
-                 OR (s.status = 'abandoned' AND s.frameio_asset_ids IS NOT NULL
-                     AND jsonb_array_length(s.frameio_asset_ids) > 0)
+                    s.frameio_asset_ids, l.id AS link_id,
+                    COALESCE(NULLIF(l.name, ''), l.brand_display_name) AS brand_display_name
+               FROM upload_sessions s JOIN links l ON s.upload_link_id = l.id
+              WHERE (s.status = 'completed'
+                     OR (s.status = 'abandoned' AND s.frameio_asset_ids IS NOT NULL
+                         AND jsonb_array_length(s.frameio_asset_ids) > 0))
+                AND ($2::text IS NULL OR concat_ws(' ', l.name, l.brand_display_name, s.uploader_name, s.uploader_email) ILIKE $2)
               ORDER BY COALESCE(s.completed_at, s.last_activity_at, s.started_at, s.created_at) DESC
               LIMIT $1",
         )
         .bind(take)
+        .bind(&pattern)
         .fetch_all(&state.db)
         .await
         .unwrap_or_default();
@@ -67,24 +77,32 @@ pub async fn history(State(state): State<AppState>, _: Admin, Query(q): Query<Hi
                 .unwrap_or_else(|| at_of(row, "created_at"));
             let size = if completed { total } else { uploaded.or_else(|| planned_bytes(&ids)) };
             let brand: Option<String> = row.get("brand_display_name");
+            let files = ids.as_ref().and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0);
             pool.push((at, json!({
                 "id": row.get::<uuid::Uuid, _>("id").to_string(),
                 "kind": "upload",
                 "label": brand.unwrap_or_else(|| "Upload".to_string()),
                 "who": who(row.get("uploader_name"), row.get("uploader_email")),
                 "bytes": size,
+                "files": files,
                 "status": if completed { "completed" } else { "incomplete" },
                 "at": crate::pyfmt::iso(&at),
+                "link_id": row.get::<uuid::Uuid, _>("link_id").to_string(),
             })));
         }
     }
-    if want_download {
+    if want("download") {
         let rows = sqlx::query(
-            "SELECT e.id, e.file_name, e.bytes_served, e.completed, e.started_at, ds.viewer_email
-               FROM download_events e JOIN download_sessions ds ON e.download_session_id = ds.id
+            "SELECT e.id, e.file_name, e.bytes_served, e.completed, e.started_at, ds.viewer_email,
+                    ds.viewer_name, ds.download_link_id, COALESCE(NULLIF(l.name, ''), l.brand_display_name) AS link_name
+               FROM download_events e
+               JOIN download_sessions ds ON e.download_session_id = ds.id
+               JOIN links l ON l.id = ds.download_link_id
+              WHERE ($2::text IS NULL OR concat_ws(' ', e.file_name, ds.viewer_email, ds.viewer_name, l.name) ILIKE $2)
               ORDER BY e.started_at DESC LIMIT $1",
         )
         .bind(take)
+        .bind(&pattern)
         .fetch_all(&state.db)
         .await
         .unwrap_or_default();
@@ -95,10 +113,46 @@ pub async fn history(State(state): State<AppState>, _: Admin, Query(q): Query<Hi
                 "id": row.get::<uuid::Uuid, _>("id").to_string(),
                 "kind": "download",
                 "label": row.get::<Option<String>, _>("file_name").unwrap_or_else(|| "Download".to_string()),
-                "who": row.get::<Option<String>, _>("viewer_email"),
+                "who": who(row.get("viewer_name"), row.get("viewer_email")),
                 "bytes": row.get::<Option<i64>, _>("bytes_served"),
+                "files": 1,
                 "status": if completed { "completed" } else { "in_progress" },
                 "at": crate::pyfmt::iso(&at),
+                "link_id": row.get::<uuid::Uuid, _>("download_link_id").to_string(),
+                "via": row.get::<Option<String>, _>("link_name"),
+            })));
+        }
+    }
+    if want("sync") {
+        let rows = sqlx::query(
+            "SELECT j.id, j.status, j.bytes, j.started_at, j.completed_at, j.created_at, j.file_name,
+                    j.frameio_file_id, j.error, r.id AS rule_id, r.name
+               FROM sync_jobs j JOIN sync_rules r ON j.sync_rule_id = r.id
+              WHERE j.status IN ('done', 'dead_letter', 'skipped')
+                AND ($2::text IS NULL OR concat_ws(' ', j.file_name, r.name) ILIKE $2)
+              ORDER BY COALESCE(j.completed_at, j.started_at, j.created_at) DESC LIMIT $1",
+        )
+        .bind(take)
+        .bind(&pattern)
+        .fetch_all(&state.db)
+        .await
+        .unwrap_or_default();
+        for row in &rows {
+            let at = row
+                .get::<Option<DateTime<Utc>>, _>("completed_at")
+                .or_else(|| row.get::<Option<DateTime<Utc>>, _>("started_at"))
+                .unwrap_or_else(|| at_of(row, "created_at"));
+            pool.push((at, json!({
+                "id": row.get::<uuid::Uuid, _>("id").to_string(),
+                "kind": "sync",
+                "label": row.get::<Option<String>, _>("file_name").unwrap_or_else(|| row.get::<String, _>("frameio_file_id")),
+                "who": row.get::<String, _>("name"),
+                "bytes": row.get::<Option<i64>, _>("bytes"),
+                "files": 1,
+                "status": row.get::<String, _>("status"),
+                "error": row.get::<Option<String>, _>("error"),
+                "at": crate::pyfmt::iso(&at),
+                "rule_id": row.get::<uuid::Uuid, _>("rule_id").to_string(),
             })));
         }
     }
@@ -148,7 +202,7 @@ pub async fn transfers(State(state): State<AppState>, _: Admin, Query(q): Query<
         "SELECT s.id, s.uploader_name, s.uploader_email, s.uploaded_bytes, s.total_bytes,
                 s.started_at, s.last_activity_at, s.frameio_asset_ids, l.id AS link_id,
                 COALESCE(NULLIF(l.name, ''), l.brand_display_name) AS brand_display_name
-           FROM upload_sessions s JOIN upload_links l ON s.upload_link_id = l.id
+           FROM upload_sessions s JOIN links l ON s.upload_link_id = l.id
           WHERE s.status = 'in_progress'
             AND COALESCE(s.last_activity_at, s.started_at, s.created_at) >= now() - interval '24 hours'
           ORDER BY s.started_at DESC NULLS LAST
@@ -162,7 +216,7 @@ pub async fn transfers(State(state): State<AppState>, _: Admin, Query(q): Query<
         "SELECT s.id, s.uploader_name, s.uploader_email, s.uploaded_bytes, s.total_bytes,
                 s.status, s.started_at, s.completed_at, s.last_activity_at, s.created_at,
                 s.frameio_asset_ids, COALESCE(NULLIF(l.name, ''), l.brand_display_name) AS brand_display_name
-           FROM upload_sessions s JOIN upload_links l ON s.upload_link_id = l.id
+           FROM upload_sessions s JOIN links l ON s.upload_link_id = l.id
           WHERE s.status = 'completed'
              OR (s.status = 'abandoned' AND s.frameio_asset_ids IS NOT NULL
                  AND jsonb_array_length(s.frameio_asset_ids) > 0)
@@ -314,8 +368,34 @@ pub async fn transfers(State(state): State<AppState>, _: Admin, Query(q): Query<
     .ok()
     .flatten();
 
+    // Files copying to the NAS right now, then the ones queued behind them.
+    let active_syncs: Vec<Value> = sqlx::query(
+        "SELECT j.id, j.status, j.file_name, j.started_at, j.created_at, r.id AS rule_id, r.name
+           FROM sync_jobs j JOIN sync_rules r ON j.sync_rule_id = r.id
+          WHERE j.status IN ('running', 'pending')
+          ORDER BY (j.status = 'running') DESC, j.created_at
+          LIMIT 12",
+    )
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default()
+    .iter()
+    .map(|r| {
+        json!({
+            "id": r.get::<uuid::Uuid, _>("id").to_string(),
+            "status": r.get::<String, _>("status"),
+            // None until the worker resolves the file (a job a webhook queued has only its id).
+            "file": r.get::<Option<String>, _>("file_name"),
+            "rule": r.get::<String, _>("name"),
+            "rule_id": r.get::<uuid::Uuid, _>("rule_id").to_string(),
+            "started_at": r.get::<Option<DateTime<Utc>>, _>("started_at").map(|d| crate::pyfmt::iso(&d)),
+        })
+    })
+    .collect();
+
     let body = json!({
         "active_uploads": active_uploads,
+        "active_syncs": active_syncs,
         "recent": recent,
         "sync_health": {
             "waiting": counts.get("waiting").copied().unwrap_or(0),

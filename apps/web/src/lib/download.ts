@@ -13,6 +13,8 @@ export type DownloadFile = {
   // Relative folder path ("" for flat sources). Used to recreate the subfolder tree when the
   // recipient saves into a chosen directory.
   path: string;
+  // False while Frame.io is still processing the original (it can't be downloaded yet).
+  ready?: boolean;
 };
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));

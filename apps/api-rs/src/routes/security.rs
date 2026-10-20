@@ -15,7 +15,7 @@ use crate::crypto::TokenCipher;
 use crate::error::detail;
 use crate::state::AppState;
 
-const PNG_MAGIC: [u8; 8] = [0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n'];
+pub const PNG_MAGIC: [u8; 8] = [0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n'];
 
 fn cipher(state: &AppState) -> TokenCipher {
     TokenCipher::new(&state.settings.token_encryption_key)
@@ -109,7 +109,7 @@ pub async fn delete_logo(State(state): State<AppState>, admin: Admin) -> Respons
     Json(branding_json(row.as_ref())).into_response()
 }
 
-fn valid_hex_color(v: &str) -> bool {
+pub fn valid_hex_color(v: &str) -> bool {
     let v = v.trim();
     let bytes = v.as_bytes();
     if !v.starts_with('#') {

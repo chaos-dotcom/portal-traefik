@@ -19,8 +19,19 @@ use crate::storage::frameio_backend::FrameioStorageBackend;
 use crate::storage::DestinationConfig;
 use crate::verify;
 
+/// What a send link holds, known without asking Frame.io: links made from the picker store their
+/// files' count and total size. None for folders (their contents can change).
+fn source_summary(source: &Value) -> Value {
+    let count = match source.get("type").and_then(|v| v.as_str()) {
+        Some("file") => 1,
+        Some("selection") => source.get("file_ids").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0),
+        _ => return Value::Null,
+    };
+    json!({ "files": count, "bytes": source.get("bytes").and_then(|v| v.as_i64()) })
+}
+
 async fn link_row(state: &AppState, token: &str) -> Result<sqlx::postgres::PgRow, Response> {
-    let row = sqlx::query("SELECT * FROM download_links WHERE token = $1")
+    let row = sqlx::query("SELECT * FROM links WHERE kind = 'download' AND token = $1")
         .bind(token)
         .fetch_optional(&state.db)
         .await
@@ -65,31 +76,27 @@ pub async fn resolve_link(
         &row.get::<Option<String>, _>("brand_display_name"),
         &row.get::<Option<String>, _>("brand_subtitle"),
     );
-    let app = sqlx::query("SELECT logo_png, logo_updated_at, brand_display_name, brand_accent_color FROM app_settings LIMIT 1")
-        .fetch_optional(&state.db).await.ok().flatten();
-    let (app_logo, _app_name, app_accent) = match app {
-        Some(r) => {
-            let has_logo = r.get::<Option<Vec<u8>>, _>("logo_png").is_some();
-            let updated: Option<DateTime<Utc>> = r.get("logo_updated_at");
-            let logo = if has_logo {
-                updated.map(|d| format!("{}/api/branding/logo?v={}", state.settings.base_url.trim_end_matches('/'), d.timestamp()))
-            } else { None };
-            (logo, r.get::<Option<String>, _>("brand_display_name"), r.get::<Option<String>, _>("brand_accent_color"))
-        }
-        None => (None, None, None),
-    };
+    let brand = crate::services::runtime_config::link_brand(&state.db, &state.settings, row.get("brand_profile_id")).await;
+    // A link without its own title takes its brand's name (the downloads `branding` helper's
+    // generic fallback otherwise).
+    let display_name = row
+        .get::<Option<String>, _>("brand_display_name")
+        .filter(|s| !s.trim().is_empty())
+        .or(brand.name.clone())
+        .unwrap_or(display_name);
     let fields: Value = row.get::<Option<Value>, _>("viewer_fields_required").unwrap_or_else(|| json!({}));
     let flag = |k: &str| fields.get(k).and_then(|v| v.as_bool()).unwrap_or(false);
     Json(json!({
         "state": link_state_of(row.get("revoked_at"), row.get("expires_at")),
         "display_name": display_name,
         "subtitle": subtitle,
-        "logo_url": app_logo,
-        "accent_color": app_accent,
+        "logo_url": brand.logo_url,
+        "accent_color": brand.accent,
         "password_required": row.get::<Option<String>, _>("password_hash").is_some(),
         "viewer_fields_required": { "name": flag("name"), "email": flag("email") },
         "verify_email": row.get::<bool, _>("verify_email"),
         "allow_preview": row.get::<bool, _>("allow_preview"),
+        "summary": source_summary(&row.get::<Value, _>("source")),
     }))
     .into_response()
 }
@@ -118,7 +125,7 @@ pub async fn request_code(
     if verify::is_trusted(&state.settings, cookies, &email) {
         return Json(json!({ "trusted": true, "sent": false })).into_response();
     }
-    match verify::request_code(&state.db, &state.settings, &email).await {
+    match verify::request_code(&state.db, &state.settings, &email, row.get("brand_profile_id")).await {
         Ok(()) => Json(json!({ "trusted": false, "sent": true })).into_response(),
         Err(e) => crate::error::detail(StatusCode::from_u16(e.status).unwrap(), &e.detail),
     }
@@ -223,6 +230,7 @@ pub async fn start_session(
         "media_type": f.media_type,
         "thumbnail_url": if allow_preview { f.thumbnail_url.clone() } else { None },
         "path": f.path,
+        "ready": f.ready(),
     })).collect();
     let mut res = Json(json!({ "session_id": session_id.to_string(), "files": files })).into_response();
     if row.get::<bool, _>("verify_email")
@@ -305,7 +313,7 @@ pub async fn file_download_url(
 
     // Atomically claim one download against the cap.
     let claimed: Option<Uuid> = sqlx::query_scalar(
-        "UPDATE download_links SET downloads_count = downloads_count + 1, updated_at = now()
+        "UPDATE links SET downloads_count = downloads_count + 1, updated_at = now()
           WHERE id = $1 AND (max_downloads IS NULL OR downloads_count < max_downloads) RETURNING id",
     )
     .bind(link_id).fetch_optional(&state.db).await.ok().flatten();

@@ -58,13 +58,18 @@ font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,s
     )
 }
 
+/// Decimal units, as Finder, Frame.io and the web app count them (lib/format.ts `formatBytes`).
 fn format_bytes(n: i64) -> String {
     let mut value = n as f64;
     for unit in ["B", "KB", "MB", "GB", "TB"] {
-        if value < 1024.0 || unit == "TB" {
-            return if unit == "B" { format!("{value:.0} {unit}") } else { format!("{value:.1} {unit}") };
+        if value < 1000.0 || unit == "TB" {
+            return match unit {
+                "B" => format!("{value:.0} {unit}"),
+                _ if value >= 100.0 => format!("{value:.0} {unit}"),
+                _ => format!("{value:.1} {unit}"),
+            };
         }
-        value /= 1024.0;
+        value /= 1000.0;
     }
     format!("{n} B")
 }
@@ -217,13 +222,17 @@ pub fn render_upload_completion(
 }
 
 #[allow(clippy::too_many_arguments)] // mirrors Python's keyword-only send_upload_completion
+/// `to`: the link's own notification addresses; empty means the app's notify address.
 pub async fn send_upload_completion(
-    config: &EmailConfig, link_name: &str, uploader_name: Option<&str>, uploader_email: Option<&str>,
+    config: &EmailConfig, to: &[String], link_name: &str, uploader_name: Option<&str>, uploader_email: Option<&str>,
     uploader_message: Option<&str>, files: &[UploadedFile], total_bytes: i64, duration_seconds: f64, brand: &EmailBrand,
 ) {
     if !config.configured() { return; }
     let (subject, text, html) = render_upload_completion(link_name, uploader_name, uploader_email, uploader_message, files, total_bytes, duration_seconds, brand);
-    let _ = send_email(config, &config.resolved_notify_email(), &subject, &text, Some(&html)).await;
+    let fallback = [config.resolved_notify_email()];
+    for addr in if to.is_empty() { &fallback[..] } else { to } {
+        let _ = send_email(config, addr, &subject, &text, Some(&html)).await;
+    }
 }
 
 /// The (subject, text, html) of the uploader's delivery receipt (issue #86): the list of files
@@ -260,6 +269,34 @@ pub async fn send_upload_receipt(config: &EmailConfig, to: &str, link_name: &str
     }
     let (subject, text, html) = render_upload_receipt(link_name, files, total_bytes, brand);
     let _ = send_email(config, to, &subject, &text, Some(&html)).await; // already logged
+}
+
+/// The (subject, text, html) of the reminder that a link expires within a day.
+pub fn render_expiry_reminder(name: &str, expires_at: &chrono::DateTime<chrono::Utc>, admin_url: &str, public_url: &str, brand: &EmailBrand) -> (String, String, String) {
+    // The server's clock zone (the container's TZ, UTC by default) is named, and the relative time
+    // leads, so the hour can't be misread from another zone.
+    let local = expires_at.with_timezone(&chrono::Local);
+    let zone = if local.offset().local_minus_utc() == 0 { "UTC".to_string() } else { local.format("UTC%:z").to_string() };
+    let hours = (*expires_at - chrono::Utc::now()).num_minutes().max(0) as f64 / 60.0;
+    let soon = if hours < 1.5 { "within the hour".to_string() } else { format!("in about {} hours", hours.round()) };
+    let when = format!("{soon} ({} {zone})", local.format("%a %-d %b at %H:%M"));
+    let subject = format!("“{name}” expires {soon}");
+    let text = format!(
+        "The link “{name}” stops working {when}.\n\nExtend it or let it close: {admin_url}\n\nThe link itself: {public_url}"
+    );
+    let body_html = format!(
+        "<p style=\"margin:0 0 16px\">The link <strong>{}</strong> stops working <strong>{}</strong>.</p>\
+<p style=\"margin:0 0 16px\"><a href=\"{admin}\" style=\"display:inline-block;background:{accent};color:#111111;\
+text-decoration:none;font-weight:600;padding:10px 18px;border-radius:8px\">Extend or review it</a></p>\
+<p style=\"margin:0;font-size:12px;color:#71717a;word-break:break-all\">{public}</p>",
+        escape(name),
+        escape(&when),
+        admin = escape(admin_url),
+        public = escape(public_url),
+        accent = escape(&brand.accent_color),
+    );
+    let html = html_shell(brand, "A link expires soon", &body_html);
+    (subject, text, html)
 }
 
 /// The (subject, text, html) of a link sent to a client from the admin: what the link is for, the
@@ -327,6 +364,24 @@ mod tests {
         let (subject, _, html) = render_link_invite("download", "Grade v4", "https://portal.example/d/x", None, &brand());
         assert_eq!(subject, "Acme Post: files for you");
         assert!(html.contains("Open and download"));
+    }
+
+    #[test]
+    fn expiry_reminder_says_when_relatively_and_names_the_zone() {
+        let at = chrono::Utc::now() + chrono::Duration::hours(20);
+        let (subject, text, html) =
+            render_expiry_reminder("Cards <A>", &at, "https://portal.example/upload-links/1", "https://portal.example/u/t", &brand());
+        assert_eq!(subject, "“Cards <A>” expires in about 20 hours");
+        assert!(text.contains("in about 20 hours (") && text.contains(" UTC"), "{text}");
+        assert!(html.contains("Cards &lt;A&gt;") && html.contains("href=\"https://portal.example/upload-links/1\""));
+    }
+
+    #[test]
+    fn sizes_are_decimal_like_the_web_app() {
+        assert_eq!(format_bytes(999), "999 B");
+        assert_eq!(format_bytes(93_000_000_000), "93.0 GB");
+        assert_eq!(format_bytes(164_000_000_000), "164 GB");
+        assert_eq!(format_bytes(1_500_000_000_000), "1.5 TB");
     }
 
     #[test]

@@ -354,7 +354,7 @@ pub async fn reconcile_rule(
 
     for f in files {
         let existing = sqlx::query(
-            "SELECT id, status, error, started_at, updated_at FROM sync_jobs WHERE sync_rule_id = $1 AND frameio_file_id = $2",
+            "SELECT id, status, error, started_at, updated_at, file_name FROM sync_jobs WHERE sync_rule_id = $1 AND frameio_file_id = $2",
         )
         .bind(rule.id)
         .bind(&f.id)
@@ -376,6 +376,14 @@ pub async fn reconcile_rule(
                 created.push(id);
             }
             Some(row) => {
+                // Name jobs made before jobs carried names (the listing has them for free).
+                if row.get::<Option<String>, _>("file_name").is_none() {
+                    let _ = sqlx::query("UPDATE sync_jobs SET file_name = $1 WHERE id = $2 AND file_name IS NULL")
+                        .bind(display_name(&f))
+                        .bind(row.get::<Uuid, _>("id"))
+                        .execute(db)
+                        .await;
+                }
                 let job = SyncJobRow {
                     id: row.get("id"),
                     sync_rule_id: rule.id,

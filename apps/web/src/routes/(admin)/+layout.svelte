@@ -2,10 +2,11 @@
   import { onNavigate } from "$app/navigation";
   import { page } from "$app/state";
   import { onMount } from "svelte";
-  import { Icon, Toaster, type IconName } from "$lib/components";
+  import { CommandPalette, Icon, Toaster, type IconName } from "$lib/components";
   import { onLiveChange, startLive, stopLive } from "$lib/live.svelte";
 
   let { children } = $props();
+  let paletteOpen = $state(false);
 
   // View transitions API — crossfade between pages
   onNavigate((navigation) => {
@@ -42,7 +43,7 @@
   type Section = { label: string; href: string; match: string[]; icon: IconName };
   const sections: Section[] = [
     { label: "Dashboard", href: "/", match: ["/activity", "/history"], icon: "home" },
-    { label: "Files", href: "/explorer", match: ["/explorer"], icon: "folder" },
+    // Files (/explorer) is hidden for now: links and the picker cover what it was used for.
     { label: "Links", href: "/links", match: ["/links", "/upload-links", "/download-links", "/destinations"], icon: "link" },
     { label: "Sync", href: "/sync", match: ["/sync", "/sync-rules"], icon: "sync" },
     { label: "Settings", href: "/settings", match: ["/settings", "/connections"], icon: "sliders" },
@@ -62,19 +63,19 @@
 
   <!-- Floating pill navigation — full-width at the bottom on mobile, centered at the top on desktop -->
   <nav
-    class="fixed bottom-5 left-4 right-4 z-40 flex items-center rounded-full border border-border bg-surface/85 px-2 py-2 shadow-xl backdrop-blur-md sm:bottom-auto sm:left-1/2 sm:right-auto sm:top-5 sm:w-auto sm:-translate-x-1/2"
+    class="fixed bottom-5 left-4 right-4 z-40 flex items-center gap-0.5 rounded-full border border-border bg-surface/85 p-[5px] shadow-xl backdrop-blur-md sm:bottom-auto sm:left-1/2 sm:right-auto sm:top-5 sm:w-auto sm:-translate-x-1/2"
     aria-label="Main navigation"
   >
     {#each sections as s (s.label)}
       {@const on = active(s)}
       <a
         href={s.href}
-        class="relative flex flex-1 items-center justify-center gap-2 rounded-full px-4 py-2.5 text-sm font-medium transition-colors sm:flex-none {on
+        class="relative flex h-9 flex-1 items-center justify-center gap-2 rounded-full px-5 text-[13px] font-medium transition-colors sm:h-8 sm:flex-none {on
           ? 'bg-surface-3 text-accent'
           : 'text-muted hover:bg-surface-2 hover:text-text'}"
         aria-current={on ? "page" : undefined}
       >
-        <Icon name={s.icon} size={19} />
+        <Icon name={s.icon} size={17} />
         <span class="hidden sm:inline">{s.label}</span>
         {#if s.href === "/" && nav?.uploads_live}
           <span class="live-dot absolute top-2 right-3 sm:static" title="{nav.uploads_live} upload{nav.uploads_live === 1 ? '' : 's'} arriving now"></span>
@@ -87,7 +88,18 @@
         {/if}
       </a>
     {/each}
+    <button
+      type="button"
+      class="flex h-9 flex-1 items-center justify-center gap-2 rounded-full px-4 text-muted transition-colors hover:bg-surface-2 hover:text-text sm:h-8 sm:flex-none sm:px-3"
+      title="Search and commands (⌘K)"
+      aria-label="Search and commands"
+      onclick={() => (paletteOpen = true)}
+    >
+      <Icon name="search" size={17} />
+      <kbd class="hidden font-mono text-[10.5px] text-faint sm:inline">⌘K</kbd>
+    </button>
   </nav>
 </div>
 
+<CommandPalette bind:open={paletteOpen} />
 <Toaster />

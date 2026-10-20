@@ -39,7 +39,8 @@ pub fn is_sync_trigger(payload: &crate::frameio::webhooks::WebhookPayload) -> bo
 /// ignore the arrival — the moment we know the file is finalized — so the sync trailed the upload
 /// by up to a full poll (issue #85). Waking it is safe: the worker claims jobs atomically and drops
 /// the superseded poll (see `sync::worker::run_sync_job`).
-async fn job_to_run(db: &PgPool, rule_id: Uuid, file_id: &str) -> sqlx::Result<Option<(Uuid, bool)>> {
+/// `name` labels a new job until the worker resolves the file's real path (an upload knows it).
+async fn job_to_run(db: &PgPool, rule_id: Uuid, file_id: &str, name: Option<&str>) -> sqlx::Result<Option<(Uuid, bool)>> {
     let existing = sqlx::query("SELECT id, status FROM sync_jobs WHERE sync_rule_id = $1 AND frameio_file_id = $2")
         .bind(rule_id)
         .bind(file_id)
@@ -48,10 +49,11 @@ async fn job_to_run(db: &PgPool, rule_id: Uuid, file_id: &str) -> sqlx::Result<O
     match existing {
         None => {
             let id: Uuid = sqlx::query_scalar(
-                "INSERT INTO sync_jobs (sync_rule_id, frameio_file_id, status, retry_count) VALUES ($1,$2,'pending',0) RETURNING id",
+                "INSERT INTO sync_jobs (sync_rule_id, frameio_file_id, file_name, status, retry_count) VALUES ($1,$2,$3,'pending',0) RETURNING id",
             )
             .bind(rule_id)
             .bind(file_id)
+            .bind(name)
             .fetch_one(db)
             .await?;
             Ok(Some((id, true)))
@@ -76,7 +78,7 @@ async fn jobs_for_event(
         if !rule_matches(&source, payload) {
             continue;
         }
-        if let Some((id, is_new)) = job_to_run(db, r.get("id"), file_id).await? {
+        if let Some((id, is_new)) = job_to_run(db, r.get("id"), file_id, None).await? {
             if is_new { created.push(id) } else { woken.push(id) }
         }
     }
@@ -140,9 +142,9 @@ pub async fn process_event(db: &PgPool, event_id: Uuid) -> Vec<Uuid> {
 pub async fn trigger_sync_for_upload(
     db: &PgPool,
     folder: &serde_json::Value,
-    file_ids: &[String],
+    files: &[(String, Option<String>)],
 ) -> Vec<Uuid> {
-    if file_ids.is_empty() {
+    if files.is_empty() {
         return Vec::new();
     }
     let folder_id = folder.get("folder_id").and_then(|v| v.as_str()).unwrap_or("");
@@ -152,8 +154,8 @@ pub async fn trigger_sync_for_upload(
     let (mut created, mut woken) = (Vec::new(), Vec::new());
     for (rule, _) in rules_covering(folder, &rules) {
         let rule_id = rule.id;
-        for file_id in file_ids {
-            match job_to_run(db, rule_id, file_id).await {
+        for (file_id, name) in files {
+            match job_to_run(db, rule_id, file_id, name.as_deref()).await {
                 Ok(Some((id, true))) => created.push(id),
                 Ok(Some((id, false))) => woken.push(id),
                 Ok(None) => {}

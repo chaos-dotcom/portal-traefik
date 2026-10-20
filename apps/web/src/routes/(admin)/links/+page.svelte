@@ -214,7 +214,6 @@
       <button type="button" class="inline-flex h-8 items-center gap-1.5 rounded-md border border-border bg-surface-2 px-3 font-medium text-text hover:bg-surface-3" onclick={() => goto("/links/new?type=download&pick=1")}>
         <Icon name="file" size={15} />Choose files…
       </button>
-      <span class="text-faint">or select files in <a href="/explorer" class="text-muted hover:text-text">Files</a> and create a link there</span>
     </div>
   </div>
 

@@ -55,16 +55,10 @@ pub fn average_bps(uploaded: Option<i64>, started: Option<DateTime<Utc>>, last: 
 }
 
 pub async fn list_links(State(state): State<AppState>, _: Admin) -> Response {
-    let uploads = sqlx::query(sqlx::AssertSqlSafe(format!("{} ORDER BY l.created_at DESC", upload_links::LINK_COLUMNS)))
-        .fetch_all(&state.db)
-        .await;
-    let downloads = sqlx::query(sqlx::AssertSqlSafe(format!("{} ORDER BY created_at DESC", download_links::LINK_COLUMNS)))
-        .fetch_all(&state.db)
-        .await;
-    let (uploads, downloads) = match (uploads, downloads) {
-        (Ok(u), Ok(d)) => (u, d),
-        (u, d) => {
-            tracing::error!("links.list_failed: {:?} {:?}", u.err(), d.err());
+    let rows = match sqlx::query("SELECT * FROM links ORDER BY created_at DESC").fetch_all(&state.db).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!("links.list_failed: {e}");
             return detail(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error");
         }
     };
@@ -153,9 +147,9 @@ pub async fn list_links(State(state): State<AppState>, _: Admin) -> Response {
         down_last_who.insert(r.get("download_link_id"), who(r.get("viewer_name"), r.get("viewer_email")));
     }
 
-    // ── merge, newest first ─────────────────────────────────────────────────
-    let mut items: Vec<(DateTime<Utc>, Value)> = Vec::with_capacity(uploads.len() + downloads.len());
-    for row in &uploads {
+    // ── render, newest first ────────────────────────────────────────────────
+    let mut items: Vec<Value> = Vec::with_capacity(rows.len());
+    for row in rows.iter().filter(|r| r.get::<String, _>("kind") == "upload") {
         let id: Uuid = row.get("id");
         let mut v = upload_links::render_row(&state, row);
         let (count, bytes, last_at) = up_stats.get(&id).cloned().unwrap_or((0, 0, None));
@@ -167,9 +161,9 @@ pub async fn list_links(State(state): State<AppState>, _: Admin) -> Response {
             "last_who": up_last_who.get(&id).cloned().flatten(),
             "live": live.remove(&id).unwrap_or_default(),
         });
-        items.push((row.get("created_at"), v));
+        items.push(v);
     }
-    for row in &downloads {
+    for row in rows.iter().filter(|r| r.get::<String, _>("kind") == "download") {
         let id: Uuid = row.get("id");
         let mut v = download_links::render_row(&state, row);
         let (count, last_at) = down_stats.get(&id).cloned().unwrap_or((0, None));
@@ -180,10 +174,12 @@ pub async fn list_links(State(state): State<AppState>, _: Admin) -> Response {
             "last_who": down_last_who.get(&id).cloned().flatten(),
             "live": [],
         });
-        items.push((row.get("created_at"), v));
+        items.push(v);
     }
-    items.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
-    Json(Value::Array(items.into_iter().map(|(_, v)| v).collect())).into_response()
+    // Both kinds come from one table ordered newest first; keep that order across kinds.
+    let order: HashMap<String, usize> = rows.iter().enumerate().map(|(i, r)| (r.get::<Uuid, _>("id").to_string(), i)).collect();
+    items.sort_by_key(|v| v["id"].as_str().and_then(|id| order.get(id)).copied().unwrap_or(usize::MAX));
+    Json(Value::Array(items)).into_response()
 }
 
 /// `POST /api/links/email` — send a link to a client by email, from the sender address in
@@ -198,14 +194,15 @@ pub async fn email_link(State(state): State<AppState>, admin: Admin, Json(body):
         return detail(StatusCode::BAD_REQUEST, "Enter one email address");
     }
     let note = body.get("note").and_then(|v| v.as_str()).map(|s| s.chars().take(2000).collect::<String>());
-    let (table, path) = match kind {
-        "upload" => ("upload_links", "u"),
-        "download" => ("download_links", "d"),
+    let path = match kind {
+        "upload" => "u",
+        "download" => "d",
         _ => return detail(StatusCode::BAD_REQUEST, "kind must be upload or download"),
     };
-    let row = sqlx::query(sqlx::AssertSqlSafe(format!(
-        "SELECT token, name, brand_display_name, revoked_at, expires_at FROM {table} WHERE id = $1"
-    )))
+    let row = sqlx::query(
+        "SELECT token, name, brand_display_name, revoked_at, expires_at, brand_profile_id FROM links WHERE kind = $1 AND id = $2",
+    )
+    .bind(kind)
     .bind(id)
     .fetch_optional(&state.db)
     .await
@@ -219,7 +216,7 @@ pub async fn email_link(State(state): State<AppState>, admin: Admin, Json(body):
     if !config.configured() {
         return detail(StatusCode::CONFLICT, "Email isn't set up yet. Add an SMTP server in Settings.");
     }
-    let brand = crate::services::runtime_config::email_brand(&state.db, &state.settings).await;
+    let brand = crate::services::runtime_config::email_brand_for(&state.db, &state.settings, row.get("brand_profile_id")).await;
     let token: String = row.get("token");
     let url = format!("{}/{path}/{token}", state.settings.base_url.trim_end_matches('/'));
     let title = row
@@ -244,8 +241,7 @@ pub async fn email_link(State(state): State<AppState>, admin: Admin, Json(body):
 pub async fn nav_summary(State(state): State<AppState>, _: Admin) -> Response {
     let row = sqlx::query(
         "SELECT
-            (SELECT count(*) FROM upload_links WHERE revoked_at IS NULL AND (expires_at IS NULL OR expires_at > now()))
-          + (SELECT count(*) FROM download_links WHERE revoked_at IS NULL AND (expires_at IS NULL OR expires_at > now()))
+            (SELECT count(*) FROM links WHERE revoked_at IS NULL AND (expires_at IS NULL OR expires_at > now()))
               AS links_active,
             (SELECT count(*) FROM upload_sessions WHERE status = 'in_progress'
                 AND COALESCE(last_activity_at, started_at, created_at) >= now() - make_interval(secs => $1))

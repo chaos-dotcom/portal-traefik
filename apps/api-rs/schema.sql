@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict arqpPeSttG77D1ufV7KpIO8GuybgzBUgp7xSdeY5nRH9vRagiAtEfqDHnJfKQgP
+\restrict WKgMiRAa5w1u19itANG8XzEBk9I3OQa7T36P3NjzLEMAW9Qhgu9dN2josvO1QXV
 
 -- Dumped from database version 16.14 (Debian 16.14-1.pgdg13+1)
 -- Dumped by pg_dump version 16.14 (Debian 16.14-1.pgdg13+1)
@@ -72,14 +72,17 @@ CREATE TABLE public.audit_log (
 
 
 --
--- Name: destinations; Type: TABLE; Schema: public; Owner: -
+-- Name: brand_profiles; Type: TABLE; Schema: public; Owner: -
 --
 
-CREATE TABLE public.destinations (
+CREATE TABLE public.brand_profiles (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
-    display_name character varying(255) NOT NULL,
-    config jsonb NOT NULL,
-    subtitle text,
+    name character varying(255) NOT NULL,
+    display_name character varying(255),
+    accent_color character varying(32),
+    logo_png bytea,
+    logo_content_type character varying(64),
+    logo_updated_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL
 );
@@ -99,30 +102,6 @@ CREATE TABLE public.download_events (
     started_at timestamp with time zone DEFAULT now() NOT NULL,
     ip character varying(64),
     user_agent text
-);
-
-
---
--- Name: download_links; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.download_links (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    token character varying(64) NOT NULL,
-    source jsonb NOT NULL,
-    expires_at timestamp with time zone,
-    password_hash character varying(255),
-    max_downloads integer,
-    downloads_count integer NOT NULL,
-    viewer_fields_required jsonb,
-    revoked_at timestamp with time zone,
-    allow_preview boolean NOT NULL,
-    brand_display_name character varying(255),
-    brand_subtitle text,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    verify_email boolean DEFAULT false NOT NULL,
-    name character varying(255)
 );
 
 
@@ -178,6 +157,59 @@ CREATE TABLE public.frameio_connections (
 
 
 --
+-- Name: link_presets; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.link_presets (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    name character varying(255) NOT NULL,
+    kind character varying(16) NOT NULL,
+    settings jsonb DEFAULT '{}'::jsonb NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT link_presets_kind_check CHECK (((kind)::text = ANY ((ARRAY['upload'::character varying, 'download'::character varying])::text[])))
+);
+
+
+--
+-- Name: links; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.links (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    kind character varying(16) NOT NULL,
+    token character varying(64) NOT NULL,
+    name character varying(255),
+    expires_at timestamp with time zone,
+    password_hash character varying(255),
+    revoked_at timestamp with time zone,
+    verify_email boolean DEFAULT false NOT NULL,
+    brand_display_name character varying(255),
+    brand_subtitle text,
+    brand_profile_id uuid,
+    notify_emails jsonb,
+    remind_before_expiry boolean DEFAULT false NOT NULL,
+    expiry_reminded_at timestamp with time zone,
+    folder jsonb,
+    max_file_size bigint,
+    allowed_extensions jsonb,
+    uploader_fields_required jsonb,
+    target_folder_id character varying(255),
+    target_folder_name character varying(255),
+    subfolder_template text,
+    source jsonb,
+    max_downloads integer,
+    downloads_count integer DEFAULT 0 NOT NULL,
+    viewer_fields_required jsonb,
+    allow_preview boolean DEFAULT true NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT links_download_source_check CHECK ((((kind)::text <> 'download'::text) OR (source IS NOT NULL))),
+    CONSTRAINT links_kind_check CHECK (((kind)::text = ANY ((ARRAY['upload'::character varying, 'download'::character varying])::text[])))
+);
+
+
+--
 -- Name: sync_jobs; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -215,33 +247,6 @@ CREATE TABLE public.sync_rules (
     frameio_webhook_id character varying(255),
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL
-);
-
-
---
--- Name: upload_links; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.upload_links (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    token character varying(64) NOT NULL,
-    destination_id uuid,
-    expires_at timestamp with time zone,
-    password_hash character varying(255),
-    max_file_size bigint,
-    allowed_extensions jsonb,
-    uploader_fields_required jsonb,
-    revoked_at timestamp with time zone,
-    brand_display_name character varying(255),
-    brand_subtitle text,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    verify_email boolean DEFAULT false NOT NULL,
-    target_folder_id character varying(255),
-    target_folder_name character varying(255),
-    subfolder_template text,
-    name character varying(255),
-    folder jsonb
 );
 
 
@@ -344,11 +349,11 @@ ALTER TABLE ONLY public.audit_log
 
 
 --
--- Name: destinations destinations_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: brand_profiles brand_profiles_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.destinations
-    ADD CONSTRAINT destinations_pkey PRIMARY KEY (id);
+ALTER TABLE ONLY public.brand_profiles
+    ADD CONSTRAINT brand_profiles_pkey PRIMARY KEY (id);
 
 
 --
@@ -357,14 +362,6 @@ ALTER TABLE ONLY public.destinations
 
 ALTER TABLE ONLY public.download_events
     ADD CONSTRAINT download_events_pkey PRIMARY KEY (id);
-
-
---
--- Name: download_links download_links_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.download_links
-    ADD CONSTRAINT download_links_pkey PRIMARY KEY (id);
 
 
 --
@@ -392,6 +389,22 @@ ALTER TABLE ONLY public.frameio_connections
 
 
 --
+-- Name: link_presets link_presets_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.link_presets
+    ADD CONSTRAINT link_presets_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: links links_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.links
+    ADD CONSTRAINT links_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: sync_jobs sync_jobs_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -405,14 +418,6 @@ ALTER TABLE ONLY public.sync_jobs
 
 ALTER TABLE ONLY public.sync_rules
     ADD CONSTRAINT sync_rules_pkey PRIMARY KEY (id);
-
-
---
--- Name: upload_links upload_links_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.upload_links
-    ADD CONSTRAINT upload_links_pkey PRIMARY KEY (id);
 
 
 --
@@ -469,13 +474,6 @@ CREATE INDEX ix_download_events_frameio_file_id ON public.download_events USING 
 
 
 --
--- Name: ix_download_links_token; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE UNIQUE INDEX ix_download_links_token ON public.download_links USING btree (token);
-
-
---
 -- Name: ix_download_sessions_download_link_id; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -497,6 +495,13 @@ CREATE INDEX ix_frameio_connections_user_id ON public.frameio_connections USING 
 
 
 --
+-- Name: ix_links_token; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX ix_links_token ON public.links USING btree (token);
+
+
+--
 -- Name: ix_sync_jobs_frameio_file_id; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -508,20 +513,6 @@ CREATE INDEX ix_sync_jobs_frameio_file_id ON public.sync_jobs USING btree (frame
 --
 
 CREATE INDEX ix_sync_jobs_sync_rule_id ON public.sync_jobs USING btree (sync_rule_id);
-
-
---
--- Name: ix_upload_links_destination_id; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX ix_upload_links_destination_id ON public.upload_links USING btree (destination_id);
-
-
---
--- Name: ix_upload_links_token; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE UNIQUE INDEX ix_upload_links_token ON public.upload_links USING btree (token);
 
 
 --
@@ -573,7 +564,7 @@ ALTER TABLE ONLY public.download_events
 --
 
 ALTER TABLE ONLY public.download_sessions
-    ADD CONSTRAINT download_sessions_download_link_id_fkey FOREIGN KEY (download_link_id) REFERENCES public.download_links(id) ON DELETE CASCADE;
+    ADD CONSTRAINT download_sessions_download_link_id_fkey FOREIGN KEY (download_link_id) REFERENCES public.links(id) ON DELETE CASCADE;
 
 
 --
@@ -585,6 +576,14 @@ ALTER TABLE ONLY public.frameio_connections
 
 
 --
+-- Name: links links_brand_profile_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.links
+    ADD CONSTRAINT links_brand_profile_id_fkey FOREIGN KEY (brand_profile_id) REFERENCES public.brand_profiles(id) ON DELETE SET NULL;
+
+
+--
 -- Name: sync_jobs sync_jobs_sync_rule_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -593,19 +592,11 @@ ALTER TABLE ONLY public.sync_jobs
 
 
 --
--- Name: upload_links upload_links_destination_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.upload_links
-    ADD CONSTRAINT upload_links_destination_id_fkey FOREIGN KEY (destination_id) REFERENCES public.destinations(id) ON DELETE SET NULL;
-
-
---
 -- Name: upload_sessions upload_sessions_upload_link_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.upload_sessions
-    ADD CONSTRAINT upload_sessions_upload_link_id_fkey FOREIGN KEY (upload_link_id) REFERENCES public.upload_links(id) ON DELETE CASCADE;
+    ADD CONSTRAINT upload_sessions_upload_link_id_fkey FOREIGN KEY (upload_link_id) REFERENCES public.links(id) ON DELETE CASCADE;
 
 
 --
@@ -620,7 +611,7 @@ ALTER TABLE ONLY public.webauthn_credentials
 -- PostgreSQL database dump complete
 --
 
-\unrestrict arqpPeSttG77D1ufV7KpIO8GuybgzBUgp7xSdeY5nRH9vRagiAtEfqDHnJfKQgP
+\unrestrict WKgMiRAa5w1u19itANG8XzEBk9I3OQa7T36P3NjzLEMAW9Qhgu9dN2josvO1QXV
 
 
 --
@@ -629,4 +620,4 @@ ALTER TABLE ONLY public.webauthn_credentials
 -- migrate upgrades older revisions with migrations/ and refuses unknown ones (src/migrate.rs).
 -- Generated by tools/rustify/schema_check.sh --write; CI fails if it drifts from Alembic.
 --
-INSERT INTO public.alembic_version (version_num) VALUES ('d0e1f2a3b4c5');
+INSERT INTO public.alembic_version (version_num) VALUES ('e1f2a3b4c5d6');

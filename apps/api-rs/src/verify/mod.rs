@@ -7,7 +7,7 @@ use sqlx::{PgPool, Row};
 
 use crate::config::Settings;
 use crate::crypto::TokenCipher;
-use crate::services::runtime_config::{email_brand, get_email_config};
+use crate::services::runtime_config::get_email_config;
 
 pub const TRUST_COOKIE: &str = "portal_verified";
 
@@ -137,7 +137,8 @@ pub async fn is_plausible_email(email: &str, check_mx: bool) -> bool {
 }
 
 /// Issue a fresh code for `email` (cooldown enforced). Err(detail) on failure.
-pub async fn request_code(db: &PgPool, settings: &Settings, email: &str) -> Result<(), VerificationError> {
+/// `brand_profile`: the brand of the link asking, so the code email looks like its page.
+pub async fn request_code(db: &PgPool, settings: &Settings, email: &str, brand_profile: Option<uuid::Uuid>) -> Result<(), VerificationError> {
     let email_config = get_email_config(db, settings).await;
     if !email_config.configured() {
         return Err(VerificationError { status: 503, detail: "Email verification is temporarily unavailable".into() });
@@ -161,7 +162,7 @@ pub async fn request_code(db: &PgPool, settings: &Settings, email: &str) -> Resu
     }
     let code = format!("{:06}", random_below(1_000_000));
     let expires = now + Duration::seconds(settings.verify_code_ttl_seconds);
-    let brand = email_brand(db, settings).await;
+    let brand = crate::services::runtime_config::email_brand_for(db, settings, brand_profile).await;
     // Send first; only persist if the email actually went out.
     crate::notify::send_verification_code(&email_config, &email, &code, settings.verify_code_ttl_seconds / 60, &brand)
         .await

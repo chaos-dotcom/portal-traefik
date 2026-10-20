@@ -72,6 +72,8 @@
   const scoped = $derived(tree ? subtree(files, cwd) : files);
   const path = $derived(crumbs(cwd, "All files"));
   const canZip = $derived(zipReady && scoped.length <= MAX_ZIP_ENTRIES);
+  const scopedBytes = $derived(scoped.reduce((n, f) => n + (f.size ?? 0), 0));
+  const notReady = $derived(scoped.filter((f) => f.ready === false).length);
   // The archive is named after what the recipient is looking at: the folder they're in, or the link.
   const zipName = $derived(safeZipName(cwd ? (path.at(-1)?.name ?? "") : link.display_name));
 
@@ -292,6 +294,11 @@
       {#if link.logo_url}<img src={link.logo_url} alt="" class="mx-auto mb-4 h-12 object-contain" />{/if}
       <h1 class="text-2xl font-semibold tracking-tight">{link.display_name}</h1>
       {#if link.subtitle}<p class="mt-1 text-muted">{link.subtitle}</p>{/if}
+      {#if link.summary && link.state === "ok" && !files.length}
+        <p class="mt-2 text-sm text-faint">
+          {link.summary.files} file{link.summary.files === 1 ? "" : "s"}{link.summary.bytes ? ` · ${formatBytes(link.summary.bytes)}` : ""}
+        </p>
+      {/if}
     </div>
 
     {#if link.state !== "ok"}
@@ -344,7 +351,8 @@
 
           <div class="flex items-center justify-between gap-2">
             <span class="text-sm text-muted">
-              {scoped.length} file{scoped.length === 1 ? "" : "s"}{cwd ? " in this folder" : ""}
+              {scoped.length} file{scoped.length === 1 ? "" : "s"}{scopedBytes ? ` · ${formatBytes(scopedBytes)}` : ""}{cwd ? " in this folder" : ""}
+              {#if notReady}<span class="block text-xs text-warning">{notReady} still processing on Frame.io; {notReady === 1 ? "it" : "they"} can be downloaded once ready.</span>{/if}
             </span>
             {#if scoped.length > 1}
               <!-- Both folder-preserving paths are offered where available. The ZIP is worth having
@@ -426,7 +434,7 @@
                     </svg>
                   </div>
                   <div class="min-w-0 flex-1">
-                    <div class="truncate text-sm">{d.name}</div>
+                    <div class="text-sm [overflow-wrap:anywhere]">{d.name}</div>
                     <div class="text-xs text-faint">
                       {d.fileCount} file{d.fileCount === 1 ? "" : "s"}{d.size === null ? "" : ` · ${formatBytes(d.size)}`}
                     </div>
@@ -448,11 +456,11 @@
                     </div>
                   {/if}
                   <div class="min-w-0 flex-1">
-                    <div class="truncate text-sm">{f.name}</div>
-                    <div class="text-xs text-faint">{formatBytes(f.size)}</div>
+                    <div class="text-sm [overflow-wrap:anywhere]">{f.name}</div>
+                    <div class="text-xs text-faint">{formatBytes(f.size)}{#if f.ready === false} · <span class="text-warning">Processing on Frame.io</span>{/if}</div>
                   </div>
-                  <Button variant="ghost" size="sm" onclick={() => one(f)} disabled={busyFile === f.id}>
-                    {busyFile === f.id ? "…" : "Download"}
+                  <Button variant="ghost" size="sm" onclick={() => one(f)} disabled={busyFile === f.id || f.ready === false}>
+                    {busyFile === f.id ? "…" : f.ready === false ? "Not ready" : "Download"}
                   </Button>
                 </div>
               {/each}

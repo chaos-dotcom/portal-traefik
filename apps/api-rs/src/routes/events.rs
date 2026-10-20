@@ -31,10 +31,8 @@ const FINGERPRINT_SQL: &str = "SELECT concat_ws('|',
     (SELECT max(updated_at) FROM sync_jobs),
     (SELECT count(*) FROM sync_jobs),
     (SELECT count(*) FROM download_events),
-    (SELECT count(*) FROM upload_links),
-    (SELECT count(*) FROM download_links),
-    (SELECT max(revoked_at) FROM upload_links),
-    (SELECT max(revoked_at) FROM download_links))";
+    (SELECT count(*) FROM links),
+    (SELECT max(updated_at) FROM links))";
 
 static VERSION: OnceLock<watch::Sender<u64>> = OnceLock::new();
 

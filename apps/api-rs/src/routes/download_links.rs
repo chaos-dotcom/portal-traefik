@@ -61,10 +61,11 @@ fn generate_token() -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
 
+/// The columns every admin view of a download link reads (the `kind = 'download'` rows of `links`).
 pub const LINK_COLUMNS: &str = "SELECT id, token, name, source, expires_at, password_hash, max_downloads,
         downloads_count, viewer_fields_required, verify_email, allow_preview, brand_display_name,
-        brand_subtitle, revoked_at, created_at
-   FROM download_links";
+        brand_subtitle, revoked_at, created_at, brand_profile_id, notify_emails, remind_before_expiry
+   FROM links WHERE kind = 'download'";
 
 /// The name the admin sees: its own, else the client-facing title, else what it shares.
 pub fn effective_name(name: Option<String>, brand: Option<String>, source: &Value) -> String {
@@ -87,7 +88,7 @@ pub fn render_row(state: &AppState, row: &sqlx::postgres::PgRow) -> Value {
     let verify_email: bool = row.get("verify_email");
     let flag = |k: &str| fields.get(k).and_then(|v| v.as_bool()).unwrap_or(false);
     let base = state.settings.base_url.trim_end_matches('/');
-    json!({
+    let mut out = json!({
         "id": row.get::<uuid::Uuid, _>("id").to_string(),
         "kind": "download",
         "name": effective_name(row.get("name"), brand.clone(), &source),
@@ -106,7 +107,9 @@ pub fn render_row(state: &AppState, row: &sqlx::postgres::PgRow) -> Value {
         "brand_subtitle": row.get::<Option<String>, _>("brand_subtitle"),
         "revoked_at": revoked_at.map(|d| crate::pyfmt::iso(&d)),
         "created_at": crate::pyfmt::iso(&created_at),
-    })
+    });
+    crate::routes::link_options::render(row, &mut out);
+    out
 }
 
 fn str_or_none(v: Option<&Value>) -> Option<String> {
@@ -115,7 +118,7 @@ fn str_or_none(v: Option<&Value>) -> Option<String> {
 }
 
 async fn fetch_out(state: &AppState, id: uuid::Uuid) -> Option<Value> {
-    let row = sqlx::query(sqlx::AssertSqlSafe(format!("{LINK_COLUMNS} WHERE id = $1")))
+    let row = sqlx::query(sqlx::AssertSqlSafe(format!("{LINK_COLUMNS} AND id = $1")))
         .bind(id)
         .fetch_optional(&state.db)
         .await
@@ -147,15 +150,22 @@ pub async fn create_link(State(state): State<AppState>, admin: Admin, Json(body)
     }
     let password = body.get("password").and_then(|v| v.as_str()).filter(|p| !p.is_empty());
     let password_hash = password.and_then(|p| bcrypt::hash(p, bcrypt::DEFAULT_COST).ok());
+    let brand_profile = match crate::routes::link_options::brand_profile(&state, body.get("brand_profile_id")).await {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    let notify = match crate::routes::link_options::notify_emails(body.get("notify_emails")) {
+        Ok(n) => n,
+        Err(r) => return r,
+    };
     let token = generate_token();
     let brand = str_or_none(body.get("brand_display_name"));
     let name = effective_name(str_or_none(body.get("name")), brand.clone(), &source);
     let inserted = sqlx::query(
-        // downloads_count has no DB default (SQLAlchemy sets it at the model level).
-        "INSERT INTO download_links (token, name, source, expires_at, password_hash, max_downloads,
+        "INSERT INTO links (kind, token, name, source, expires_at, password_hash, max_downloads,
             viewer_fields_required, verify_email, allow_preview, brand_display_name, brand_subtitle,
-            downloads_count)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,0) RETURNING id",
+            downloads_count, brand_profile_id, notify_emails, remind_before_expiry)
+         VALUES ('download',$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,0,$12,$13,$14) RETURNING id",
     )
     .bind(&token)
     .bind(&name)
@@ -168,6 +178,9 @@ pub async fn create_link(State(state): State<AppState>, admin: Admin, Json(body)
     .bind(body.get("allow_preview").and_then(|v| v.as_bool()).unwrap_or(false))
     .bind(brand)
     .bind(body.get("brand_subtitle").and_then(|v| v.as_str()).map(|s| s.to_string()))
+    .bind(brand_profile)
+    .bind(notify)
+    .bind(body.get("remind_before_expiry").and_then(|v| v.as_bool()).unwrap_or(false))
     .fetch_one(&state.db)
     .await;
     let id: uuid::Uuid = match inserted {
@@ -195,7 +208,7 @@ pub async fn update_link(State(state): State<AppState>, admin: Admin, axum::extr
                 return crate::error::detail(axum::http::StatusCode::BAD_REQUEST, &msg);
             }
             let from_type = existing.get("source").and_then(|s| s.get("type")).cloned();
-            let _ = sqlx::query("UPDATE download_links SET source = $1 WHERE id = $2").bind(new_source).bind(id).execute(&state.db).await;
+            let _ = sqlx::query("UPDATE links SET source = $1 WHERE id = $2").bind(new_source).bind(id).execute(&state.db).await;
             let _ = sqlx::query("INSERT INTO audit_log (user_id, action, detail) VALUES ($1,'download_link.source_changed',$2)")
                 .bind(admin.id)
                 .bind(json!({ "download_link_id": id.to_string(), "from_type": from_type, "to_type": new_source.get("type") }))
@@ -204,14 +217,14 @@ pub async fn update_link(State(state): State<AppState>, admin: Admin, axum::extr
     if body.contains_key("password") {
         let pw = body.get("password").and_then(|v| v.as_str()).filter(|p| !p.is_empty());
         let hash = pw.and_then(|p| bcrypt::hash(p, bcrypt::DEFAULT_COST).ok());
-        let _ = sqlx::query("UPDATE download_links SET password_hash = $1 WHERE id = $2").bind(hash).bind(id).execute(&state.db).await;
+        let _ = sqlx::query("UPDATE links SET password_hash = $1 WHERE id = $2").bind(hash).bind(id).execute(&state.db).await;
     }
     if body.contains_key("name") {
-        let _ = sqlx::query("UPDATE download_links SET name = $1 WHERE id = $2")
+        let _ = sqlx::query("UPDATE links SET name = $1 WHERE id = $2")
             .bind(str_or_none(body.get("name"))).bind(id).execute(&state.db).await;
     }
     if body.contains_key("viewer_fields_required") {
-        let _ = sqlx::query("UPDATE download_links SET viewer_fields_required = $1 WHERE id = $2")
+        let _ = sqlx::query("UPDATE links SET viewer_fields_required = $1 WHERE id = $2")
             .bind(body.get("viewer_fields_required").cloned().unwrap_or(json!({})))
             .bind(id).execute(&state.db).await;
     }
@@ -221,18 +234,21 @@ pub async fn update_link(State(state): State<AppState>, admin: Admin, axum::extr
             match key {
                 "expires_at" => {
                     let dt = v.as_str().and_then(|s| DateTime::parse_from_rfc3339(s).ok()).map(|d| d.with_timezone(&Utc));
-                    let _ = sqlx::query("UPDATE download_links SET expires_at = $1 WHERE id = $2").bind(dt).bind(id).execute(&state.db).await;
+                    let _ = sqlx::query("UPDATE links SET expires_at = $1 WHERE id = $2").bind(dt).bind(id).execute(&state.db).await;
                 }
-                "max_downloads" => { let _ = sqlx::query("UPDATE download_links SET max_downloads = $1 WHERE id = $2").bind(v.as_i64().map(|x| x as i32)).bind(id).execute(&state.db).await; }
-                "verify_email" => { let _ = sqlx::query("UPDATE download_links SET verify_email = $1 WHERE id = $2").bind(v.as_bool().unwrap_or(false)).bind(id).execute(&state.db).await; }
-                "allow_preview" => { let _ = sqlx::query("UPDATE download_links SET allow_preview = $1 WHERE id = $2").bind(v.as_bool().unwrap_or(false)).bind(id).execute(&state.db).await; }
-                _ => { let _ = sqlx::query(sqlx::AssertSqlSafe(format!("UPDATE download_links SET {key} = $1 WHERE id = $2"))).bind(v.as_str()).bind(id).execute(&state.db).await; }
+                "max_downloads" => { let _ = sqlx::query("UPDATE links SET max_downloads = $1 WHERE id = $2").bind(v.as_i64().map(|x| x as i32)).bind(id).execute(&state.db).await; }
+                "verify_email" => { let _ = sqlx::query("UPDATE links SET verify_email = $1 WHERE id = $2").bind(v.as_bool().unwrap_or(false)).bind(id).execute(&state.db).await; }
+                "allow_preview" => { let _ = sqlx::query("UPDATE links SET allow_preview = $1 WHERE id = $2").bind(v.as_bool().unwrap_or(false)).bind(id).execute(&state.db).await; }
+                _ => { let _ = sqlx::query(sqlx::AssertSqlSafe(format!("UPDATE links SET {key} = $1 WHERE id = $2"))).bind(v.as_str()).bind(id).execute(&state.db).await; }
             }
         }
     }
-    let verify: Option<bool> = sqlx::query_scalar("SELECT verify_email FROM download_links WHERE id = $1").bind(id).fetch_optional(&state.db).await.ok().flatten();
+    if let Err(r) = crate::routes::link_options::apply_update(&state, id, &body).await {
+        return r;
+    }
+    let verify: Option<bool> = sqlx::query_scalar("SELECT verify_email FROM links WHERE id = $1").bind(id).fetch_optional(&state.db).await.ok().flatten();
     if verify == Some(true) {
-        let _ = sqlx::query("UPDATE download_links SET viewer_fields_required = jsonb_set(COALESCE(viewer_fields_required,'{}'::jsonb), '{email}', 'true') WHERE id = $1").bind(id).execute(&state.db).await;
+        let _ = sqlx::query("UPDATE links SET viewer_fields_required = jsonb_set(COALESCE(viewer_fields_required,'{}'::jsonb), '{email}', 'true') WHERE id = $1").bind(id).execute(&state.db).await;
     }
     match fetch_out(&state, id).await {
         Some(v) => Json(v).into_response(),
@@ -242,9 +258,9 @@ pub async fn update_link(State(state): State<AppState>, admin: Admin, axum::extr
 
 pub async fn revoke_link(State(state): State<AppState>, admin: Admin, axum::extract::Path(id): axum::extract::Path<uuid::Uuid>) -> Response {
     if fetch_out(&state, id).await.is_none() { return not_found(); }
-    let already: Option<DateTime<Utc>> = sqlx::query_scalar("SELECT revoked_at FROM download_links WHERE id = $1").bind(id).fetch_optional(&state.db).await.ok().flatten();
+    let already: Option<DateTime<Utc>> = sqlx::query_scalar("SELECT revoked_at FROM links WHERE id = $1").bind(id).fetch_optional(&state.db).await.ok().flatten();
     if already.is_none() {
-        let _ = sqlx::query("UPDATE download_links SET revoked_at = now() WHERE id = $1").bind(id).execute(&state.db).await;
+        let _ = sqlx::query("UPDATE links SET revoked_at = now(), updated_at = now() WHERE id = $1").bind(id).execute(&state.db).await;
         let _ = sqlx::query("INSERT INTO audit_log (user_id, action, detail) VALUES ($1,'download_link.revoked',$2)")
             .bind(admin.id).bind(json!({ "download_link_id": id.to_string() })).execute(&state.db).await;
     }
@@ -254,7 +270,7 @@ pub async fn revoke_link(State(state): State<AppState>, admin: Admin, axum::extr
 /// `POST /api/download-links/{id}/restore` — undo a revoke.
 pub async fn restore_link(State(state): State<AppState>, admin: Admin, axum::extract::Path(id): axum::extract::Path<uuid::Uuid>) -> Response {
     if fetch_out(&state, id).await.is_none() { return not_found(); }
-    let res = sqlx::query("UPDATE download_links SET revoked_at = NULL WHERE id = $1 AND revoked_at IS NOT NULL")
+    let res = sqlx::query("UPDATE links SET revoked_at = NULL, updated_at = now() WHERE id = $1 AND revoked_at IS NOT NULL")
         .bind(id).execute(&state.db).await;
     if res.map(|r| r.rows_affected()).unwrap_or(0) > 0 {
         let _ = sqlx::query("INSERT INTO audit_log (user_id, action, detail) VALUES ($1,'download_link.restored',$2)")
@@ -265,7 +281,7 @@ pub async fn restore_link(State(state): State<AppState>, admin: Admin, axum::ext
 
 pub async fn delete_link(State(state): State<AppState>, admin: Admin, axum::extract::Path(id): axum::extract::Path<uuid::Uuid>) -> Response {
     if fetch_out(&state, id).await.is_none() { return not_found(); }
-    let _ = sqlx::query("DELETE FROM download_links WHERE id = $1").bind(id).execute(&state.db).await;
+    let _ = sqlx::query("DELETE FROM links WHERE id = $1").bind(id).execute(&state.db).await;
     let _ = sqlx::query("INSERT INTO audit_log (user_id, action, detail) VALUES ($1,'download_link.deleted',$2)")
         .bind(admin.id).bind(json!({ "download_link_id": id.to_string() })).execute(&state.db).await;
     axum::http::StatusCode::NO_CONTENT.into_response()

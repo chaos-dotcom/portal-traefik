@@ -153,8 +153,8 @@
   function fmtBytes(n: number | null): string {
     if (n == null) return "";
     const u = ["B", "KB", "MB", "GB", "TB"];
-    const i = n > 0 ? Math.floor(Math.log(n) / Math.log(1024)) : 0;
-    return `${(n / 1024 ** i).toFixed(i === 0 ? 0 : 1)} ${u[i]}`;
+    const i = n > 0 ? Math.floor(Math.log(n) / Math.log(1000)) : 0;
+    return `${(n / 1000 ** i).toFixed(i === 0 ? 0 : 1)} ${u[i]}`;
   }
 
   // ── actions ────────────────────────────────────────────────────────────────

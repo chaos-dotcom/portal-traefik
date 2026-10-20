@@ -145,9 +145,10 @@
           .map((p) => ({ kind: "project", id: p.id, name: p.name, folder_id: p.root_folder_id ?? undefined }));
       } else {
         const fid = t.kind === "project" ? t.folder_id! : t.id;
+        // Folder mode lists files too, dimmed, so you can tell you're in the right place.
         const [folders, fileList] = await Promise.all([
           listFolders(acct, fid),
-          mode === "source" ? listFiles(acct, fid) : Promise.resolve([] as FileItem[]),
+          listFiles(acct, fid).catch(() => [] as FileItem[]),
         ]);
         if (my !== seq) return;
         files = fileList;
@@ -240,7 +241,9 @@
             ref: r,
           }))
         : [];
-    return { rec, here, fileRows, there };
+    // In folder mode files are context only: shown, not selectable.
+    const contextFiles = mode === "folder" ? files.filter((f) => match(f.name)) : [];
+    return { rec, here, fileRows, there, contextFiles };
   });
   const rows = $derived([...view.rec, ...view.here, ...view.fileRows, ...view.there]);
   const showSel = $derived(!!q.trim() || kbd);
@@ -488,8 +491,19 @@
           {/if}
           {#each view.here as r, i (r.kind + r.id)}{@render item(r, view.rec.length + i)}{/each}
           {#each view.fileRows as r, i (r.id)}{@render item(r, view.rec.length + view.here.length + i)}{/each}
+          {#if view.contextFiles.length}
+            <div class="px-2.5 pt-2.5 pb-1 text-[11.5px] font-medium text-faint">{view.contextFiles.length} file{view.contextFiles.length === 1 ? "" : "s"} in here</div>
+            {#each view.contextFiles.slice(0, 40) as f (f.id)}
+              <div class="flex h-[30px] items-center gap-2.5 px-2.5 text-faint">
+                <Icon name="file" />
+                <span class="min-w-0 flex-1 truncate">{f.name}</span>
+                <span class="tnum text-xs">{f.file_size != null ? formatBytes(f.file_size) : ""}</span>
+              </div>
+            {/each}
+            {#if view.contextFiles.length > 40}<div class="px-2.5 py-1 text-xs text-faint">and {view.contextFiles.length - 40} more</div>{/if}
+          {/if}
 
-          {#if !q.trim() && !error && !view.here.length && !view.fileRows.length}
+          {#if !q.trim() && !error && !view.here.length && !view.fileRows.length && !view.contextFiles.length}
             <p class="py-12 text-center text-faint">{inFolder ? (mode === "source" ? "This folder is empty" : "No folders in here yet") : "Nothing here"}</p>
           {/if}
 
