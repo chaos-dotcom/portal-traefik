@@ -31,6 +31,17 @@ pub struct PickerItem {
     pub project_id: Option<String>,
 }
 
+/// A project or folder found by name with `FrameioClient::search`.
+#[derive(Clone, Debug)]
+pub struct SearchHit {
+    pub kind: &'static str,
+    pub id: String,
+    pub name: String,
+    pub project_id: Option<String>,
+    pub root_folder_id: Option<String>,
+    pub workspace_id: Option<String>,
+}
+
 #[derive(Clone, Debug)]
 pub struct ProjectItem {
     pub id: String,

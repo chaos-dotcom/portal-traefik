@@ -228,6 +228,13 @@ pub async fn execute_job(
         Err(e) => return Err(JobError::Frameio(e)),
     };
 
+    // Name the job after its file (jobs made from a webhook only know the file's id).
+    let _ = sqlx::query("UPDATE sync_jobs SET file_name = $1 WHERE id = $2 AND file_name IS DISTINCT FROM $1")
+        .bind(display_name(&remote))
+        .bind(job.id)
+        .execute(db)
+        .await;
+
     // Scope first: a file outside the rule's folder is never synced, so don't wait on it.
     if !in_scope(&rule.source_config, &remote) {
         job.status = "skipped".to_string();
@@ -291,6 +298,14 @@ pub async fn execute_job(
     Ok(())
 }
 
+/// The name a job is shown by: the file's path below the rule's folder, e.g. "Dailies/A001.mov".
+fn display_name(f: &RemoteFile) -> String {
+    match f.relative_dir.as_deref() {
+        Some(dir) if !dir.is_empty() => format!("{dir}/{}", f.name),
+        _ => f.name.clone(),
+    }
+}
+
 /// Re-pick every job left `running` (worker died mid-download) and re-enqueue it.
 pub async fn reclaim_orphaned_running(db: &PgPool) -> sqlx::Result<Vec<Uuid>> {
     let rows = sqlx::query("SELECT id FROM sync_jobs WHERE status = 'running'")
@@ -339,7 +354,7 @@ pub async fn reconcile_rule(
 
     for f in files {
         let existing = sqlx::query(
-            "SELECT id, status, error, started_at, updated_at FROM sync_jobs WHERE sync_rule_id = $1 AND frameio_file_id = $2",
+            "SELECT id, status, error, started_at, updated_at, file_name FROM sync_jobs WHERE sync_rule_id = $1 AND frameio_file_id = $2",
         )
         .bind(rule.id)
         .bind(&f.id)
@@ -350,16 +365,25 @@ pub async fn reconcile_rule(
         match existing {
             None => {
                 let id: Uuid = sqlx::query_scalar(
-                    "INSERT INTO sync_jobs (sync_rule_id, frameio_file_id, status, retry_count) VALUES ($1,$2,'pending',0) RETURNING id",
+                    "INSERT INTO sync_jobs (sync_rule_id, frameio_file_id, file_name, status, retry_count) VALUES ($1,$2,$3,'pending',0) RETURNING id",
                 )
                 .bind(rule.id)
                 .bind(&f.id)
+                .bind(display_name(&f))
                 .fetch_one(db)
                 .await
                 .map_err(|e| JobError::Other(e.to_string()))?;
                 created.push(id);
             }
             Some(row) => {
+                // Name jobs made before jobs carried names (the listing has them for free).
+                if row.get::<Option<String>, _>("file_name").is_none() {
+                    let _ = sqlx::query("UPDATE sync_jobs SET file_name = $1 WHERE id = $2 AND file_name IS NULL")
+                        .bind(display_name(&f))
+                        .bind(row.get::<Uuid, _>("id"))
+                        .execute(db)
+                        .await;
+                }
                 let job = SyncJobRow {
                     id: row.get("id"),
                     sync_rule_id: rule.id,

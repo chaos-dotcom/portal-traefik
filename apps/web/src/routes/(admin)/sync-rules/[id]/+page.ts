@@ -5,6 +5,7 @@ import type { SyncRule } from "../+page";
 export type SyncJob = {
   id: string;
   frameio_file_id: string;
+  file_name: string | null;
   status: string;
   bytes: number | null;
   sha256: string | null;

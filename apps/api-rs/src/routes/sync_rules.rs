@@ -139,6 +139,7 @@ fn rule_json(name: &str, rule: &runner::SyncRuleRow, created_at: DateTime<Utc>) 
 pub async fn list_rules(State(state): State<AppState>, _: Admin) -> Response {
     let rows = sqlx::query("SELECT * FROM sync_rules ORDER BY created_at DESC").fetch_all(&state.db).await;
     let Ok(rows) = rows else { return detail(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error") };
+    let mut activity = rule_activity(&state).await;
     let out: Vec<Value> = rows
         .iter()
         .map(|r| {
@@ -151,10 +152,60 @@ pub async fn list_rules(State(state): State<AppState>, _: Admin) -> Response {
                 frameio_webhook_id: r.get("frameio_webhook_id"),
                 enabled: r.get("enabled"),
             };
-            rule_json(&r.get::<String, _>("name"), &rule, r.get("created_at"))
+            let mut out = rule_json(&r.get::<String, _>("name"), &rule, r.get("created_at"));
+            out["activity"] = activity.remove(&rule.id).unwrap_or_else(empty_activity);
+            out
         })
         .collect();
     Json(Value::Array(out)).into_response()
+}
+
+fn empty_activity() -> Value {
+    json!({ "counts": {}, "bytes_done": 0, "last_done_at": null, "last_done_file": null,
+            "running_file": null, "waiting_file": null, "failed_file": null })
+}
+
+/// What each rule is doing, for the Sync page: job counts by status, bytes synced, the last file
+/// that landed, and the file it's busy with (or waiting on, or failed on). DB-only, four queries.
+async fn rule_activity(state: &AppState) -> HashMap<Uuid, Value> {
+    let mut out: HashMap<Uuid, Value> = HashMap::new();
+    let counts = sqlx::query(
+        "SELECT sync_rule_id, status, count(*) AS n, COALESCE(sum(bytes) FILTER (WHERE status = 'done'), 0)::bigint AS bytes
+           FROM sync_jobs GROUP BY sync_rule_id, status",
+    )
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+    for r in &counts {
+        let a = out.entry(r.get("sync_rule_id")).or_insert_with(empty_activity);
+        a["counts"][r.get::<String, _>("status")] = json!(r.get::<i64, _>("n"));
+        let bytes = a["bytes_done"].as_i64().unwrap_or(0) + r.get::<i64, _>("bytes");
+        a["bytes_done"] = json!(bytes);
+    }
+    // The newest job per rule in each interesting state.
+    for (status, file_key, at_key, order) in [
+        ("done", "last_done_file", Some("last_done_at"), "completed_at DESC NULLS LAST"),
+        ("running", "running_file", None, "started_at DESC NULLS LAST"),
+        ("waiting", "waiting_file", None, "updated_at DESC"),
+        ("dead_letter", "failed_file", None, "updated_at DESC"),
+    ] {
+        let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "SELECT DISTINCT ON (sync_rule_id) sync_rule_id, COALESCE(file_name, frameio_file_id) AS file, completed_at
+               FROM sync_jobs WHERE status = $1 ORDER BY sync_rule_id, {order}"
+        )))
+        .bind(status)
+        .fetch_all(&state.db)
+        .await
+        .unwrap_or_default();
+        for r in &rows {
+            let a = out.entry(r.get("sync_rule_id")).or_insert_with(empty_activity);
+            a[file_key] = json!(r.get::<String, _>("file"));
+            if let Some(k) = at_key {
+                a[k] = json!(r.get::<Option<DateTime<Utc>>, _>("completed_at").map(|d| crate::pyfmt::iso(&d)));
+            }
+        }
+    }
+    out
 }
 
 pub async fn create_rule(State(state): State<AppState>, admin: Admin, Json(body): Json<Value>) -> Response {
@@ -308,6 +359,7 @@ pub fn job_out(j: &sqlx::postgres::PgRow) -> Value {
     json!({
         "id": j.get::<Uuid, _>("id").to_string(),
         "frameio_file_id": j.get::<String, _>("frameio_file_id"),
+        "file_name": j.get::<Option<String>, _>("file_name"),
         "status": j.get::<String, _>("status"),
         "bytes": j.get::<Option<i64>, _>("bytes"),
         "sha256": j.get::<Option<String>, _>("sha256"),

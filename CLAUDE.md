@@ -98,8 +98,12 @@ routes / upload engine / sync engine
   one process-wide HTTP client, folder-metadata cache with a 10-minute TTL. Errors are
   `FrameioError` — Frame.io internals never leak upward.
 - Storage value objects (`DestinationConfig`, `RemoteFile`, `UploadSession`, `UploadCredentials`,
-  `DownloadURL`, …) are the seam. `DestinationConfig` mirrors the type-tagged
-  `destinations.config` JSONB (`{"type":"frameio","account_id","workspace_id","project_id","folder_id"}`).
+  `DownloadURL`, …) are the seam. `DestinationConfig` mirrors the type-tagged Frame.io folder JSONB
+  (`{"type":"frameio","account_id","workspace_id","project_id","folder_id","path"}`) that an upload
+  link stores as `links.folder` and a sync rule as `source_config`. Upload and download links share
+  one `links` table (`kind` = `upload` | `download`; migration `e1f2a3b4c5d6` merged the old
+  `upload_links`/`download_links` and dropped `destinations`). The Python reference's models still
+  describe the old tables — its tests build from the models, so they don't notice.
 - Pickers (admin-only, under `/api/frameio`): list accounts/workspaces/projects/folders/files;
   cursor pagination via `links.next` → `after`, capped at `PICKER_MAX_ITEMS`.
 

@@ -16,7 +16,7 @@ use tokio::sync::Mutex;
 
 use crate::config::Settings;
 use crate::frameio::connection::{get_primary_connection, get_valid_access_token, ConnectionRow};
-use crate::frameio::{FrameioError, PickerItem, ProjectItem};
+use crate::frameio::{FrameioError, PickerItem, ProjectItem, SearchHit};
 
 const MAX_RETRIES: u32 = 4;
 const PICKER_PAGE_SIZE: usize = 100;
@@ -261,6 +261,22 @@ impl FrameioClient {
         )
         .await
         .map(|_| ())
+    }
+
+    /// Projects and folders whose own name matches `query`, anywhere in the account (one page).
+    /// Hits found only because their project's name matches are dropped, and so are projects'
+    /// root folders (the project stands for them).
+    pub async fn search(&self, account_id: &str, query: &str, limit: usize) -> Result<Vec<SearchHit>, FrameioError> {
+        let body = json!({
+            "query": query,
+            "engine": "lexical",
+            "filters": { "projects": true, "folders": true, "files_and_version_stacks": false },
+        });
+        let q = vec![("page_size".to_string(), limit.to_string())];
+        let v = self
+            .send(reqwest::Method::POST, &format!("accounts/{account_id}/search"), &q, Some(body))
+            .await?;
+        Ok(v.get("data").and_then(|d| d.as_array()).map(|hits| parse_search_hits(hits)).unwrap_or_default())
     }
 
     pub async fn get_project(&self, account_id: &str, project_id: &str) -> Result<ProjectItem, FrameioError> {
@@ -617,5 +633,68 @@ impl FrameioClient {
             Some(json!({"data": data})),
         )
         .await
+    }
+}
+
+/// Map Frame.io search results (`{type, result, matches}`) to hits; see `FrameioClient::search`.
+fn parse_search_hits(hits: &[Value]) -> Vec<SearchHit> {
+    let mut out = Vec::new();
+    for h in hits {
+        let named = h
+            .get("matches")
+            .and_then(|m| m.as_array())
+            .map(|m| m.iter().any(|x| x.get("type").and_then(|t| t.as_str()) == Some("name_match")))
+            .unwrap_or(true);
+        let Some(r) = h.get("result") else { continue };
+        let Some(id) = s(r, "id") else { continue };
+        if !named {
+            continue;
+        }
+        let name = s(r, "name").unwrap_or_else(|| id.clone());
+        match h.get("type").and_then(|t| t.as_str()) {
+            Some("project_result") => out.push(SearchHit {
+                kind: "project",
+                project_id: Some(id.clone()),
+                root_folder_id: s(r, "root_folder_id"),
+                workspace_id: s(r, "workspace_id"),
+                id,
+                name,
+            }),
+            Some("folder_result") if s(r, "parent_id").is_some_and(|p| !p.is_empty()) => out.push(SearchHit {
+                kind: "folder",
+                project_id: s(r, "project_id"),
+                root_folder_id: None,
+                workspace_id: s(r, "workspace_id"),
+                id,
+                name,
+            }),
+            _ => {}
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn search_keeps_name_matches_and_drops_root_folders() {
+        let hits = json!([
+            { "type": "project_result", "result": { "id": "p1", "name": "Audio Dept", "root_folder_id": "r1", "workspace_id": "w1" },
+              "matches": [{ "type": "name_match" }] },
+            { "type": "folder_result", "result": { "id": "f1", "name": "Audio", "parent_id": "r2", "project_id": "p2", "workspace_id": "w1" },
+              "matches": [{ "type": "name_match" }] },
+            { "type": "folder_result", "result": { "id": "f2", "name": "Day 3", "parent_id": "r1", "project_id": "p1" },
+              "matches": [{ "type": "project_match", "project": { "id": "p1", "name": "Audio Dept" } }] },
+            { "type": "folder_result", "result": { "id": "r3", "name": "Audio root", "parent_id": null, "project_id": "p3" },
+              "matches": [{ "type": "name_match" }] },
+            { "type": "file_result", "result": { "id": "x", "name": "audio.wav" } }
+        ]);
+        let out = parse_search_hits(hits.as_array().unwrap());
+        let got: Vec<(&str, &str)> = out.iter().map(|h| (h.kind, h.id.as_str())).collect();
+        assert_eq!(got, vec![("project", "p1"), ("folder", "f1")]);
+        assert_eq!(out[0].root_folder_id.as_deref(), Some("r1"));
+        assert_eq!(out[1].project_id.as_deref(), Some("p2"));
     }
 }

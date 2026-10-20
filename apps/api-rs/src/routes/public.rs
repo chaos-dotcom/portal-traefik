@@ -13,7 +13,7 @@ use sqlx::Row;
 use uuid::Uuid;
 
 use crate::common::{lockout, ratelimit};
-use crate::services::runtime_config::{email_brand, get_email_config};
+use crate::services::runtime_config::{email_brand_for, get_email_config, link_brand};
 use crate::storage::frameio_backend::FrameioStorageBackend;
 use crate::storage::{DestinationConfig, UploadSession as StorageUploadSession};
 use crate::sync::paths::render_session_prefix;
@@ -27,10 +27,8 @@ fn detail_response(status: StatusCode, message: &str) -> Response {
 
 async fn link_row(state: &AppState, token: &str) -> Result<sqlx::postgres::PgRow, Response> {
     let row = sqlx::query(
-        "SELECT l.*, d.display_name AS destination_name, d.subtitle AS destination_subtitle,
-                d.config AS destination_config
-           FROM upload_links l JOIN destinations d ON d.id = l.destination_id
-          WHERE l.token = $1",
+        "SELECT l.*, COALESCE(l.folder, '{}'::jsonb) AS link_folder
+           FROM links l WHERE l.kind = 'upload' AND l.token = $1",
     )
     .bind(token)
     .fetch_optional(&state.db)
@@ -82,29 +80,9 @@ pub async fn resolve_link(
         Ok(r) => r,
         Err(r) => return r,
     };
-    let app = sqlx::query(
-        "SELECT logo_png, logo_updated_at, brand_display_name, brand_accent_color FROM app_settings LIMIT 1",
-    )
-    .fetch_optional(&state.db)
-    .await
-    .ok()
-    .flatten();
-    let (app_logo, app_name, app_accent) = match app {
-        Some(r) => {
-            let has_logo = r.get::<Option<Vec<u8>>, _>("logo_png").is_some();
-            let updated: Option<DateTime<Utc>> = r.get("logo_updated_at");
-            let logo = if has_logo {
-                updated.map(|d| format!("{}/api/branding/logo?v={}", state.settings.base_url.trim_end_matches('/'), d.timestamp()))
-            } else {
-                None
-            };
-            (logo, r.get::<Option<String>, _>("brand_display_name"), r.get::<Option<String>, _>("brand_accent_color"))
-        }
-        None => (None, None, None),
-    };
-    let branding_name = or_else(row.get("brand_display_name"), row.get("destination_name"));
-    let branding_subtitle = or_else(row.get("brand_subtitle"), row.get("destination_subtitle"));
-    let display_name = or_else(branding_name, app_name).unwrap_or_else(|| "Upload".to_string());
+    let brand = link_brand(&state.db, &state.settings, row.get("brand_profile_id")).await;
+    let display_name = or_else(row.get("brand_display_name"), brand.name).unwrap_or_else(|| "Upload".to_string());
+    let branding_subtitle = or_else(row.get("brand_subtitle"), None);
     let fields: Option<Value> = row.get("uploader_fields_required");
     let fields = fields.unwrap_or_else(|| json!({}));
     let flag = |k: &str| fields.get(k).and_then(|v| v.as_bool()).unwrap_or(false);
@@ -112,8 +90,8 @@ pub async fn resolve_link(
         "state": link_state_of(row.get("revoked_at"), row.get("expires_at")),
         "display_name": display_name,
         "subtitle": branding_subtitle,
-        "logo_url": app_logo,
-        "accent_color": app_accent,
+        "logo_url": brand.logo_url,
+        "accent_color": brand.accent,
         "password_required": row.get::<Option<String>, _>("password_hash").is_some(),
         "max_file_size": row.get::<Option<i64>, _>("max_file_size"),
         "allowed_extensions": row.get::<Option<Value>, _>("allowed_extensions").unwrap_or(Value::Null),
@@ -152,7 +130,7 @@ pub async fn request_code(
     if verify::is_trusted(&state.settings, cookies, &email) {
         return Json(json!({ "trusted": true, "sent": false })).into_response();
     }
-    match verify::request_code(&state.db, &state.settings, &email).await {
+    match verify::request_code(&state.db, &state.settings, &email, row.get("brand_profile_id")).await {
         Ok(()) => Json(json!({ "trusted": false, "sent": true })).into_response(),
         Err(e) => detail_response(StatusCode::from_u16(e.status).unwrap(), &e.detail),
     }
@@ -400,7 +378,7 @@ pub async fn request_file_upload(
     let prefix = render_session_prefix(template.as_deref(), uploader_name.as_deref().unwrap_or(""), started_at.map(|d| d.with_timezone(&chrono::Local)));
     let effective_path = if prefix.is_empty() { path.to_string() } else { format!("{prefix}/{path}") };
 
-    let dest_cfg: Value = row.get("destination_config");
+    let dest_cfg: Value = row.get("link_folder");
     let target_folder: Option<String> = row.get("target_folder_id");
     let dest = destination_config(&dest_cfg, target_folder);
     let backend = FrameioStorageBackend::new(state.frameio.clone());
@@ -444,10 +422,17 @@ pub async fn complete_file(
         Err(r) => return r,
     };
     let link_id: Uuid = row.get("id");
-    if let Err(r) = load_session(&state, link_id, &session_id).await {
-        return r;
-    }
-    let dest_cfg: Value = row.get("destination_config");
+    let session = match load_session(&state, link_id, &session_id).await {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    // The name it was uploaded under, to label its sync job until the worker resolves the path.
+    let name: Option<String> = session
+        .get::<Option<Value>, _>("frameio_asset_ids")
+        .and_then(|v| v.as_array().cloned())
+        .and_then(|a| a.into_iter().find(|e| e.get("file_id").and_then(|x| x.as_str()) == Some(file_id.as_str())))
+        .and_then(|e| e.get("name").and_then(|n| n.as_str()).map(String::from));
+    let dest_cfg: Value = row.get("link_folder");
     let dest = destination_config(&dest_cfg, None);
     let storage_session = StorageUploadSession {
         id: file_id.clone(),
@@ -467,15 +452,15 @@ pub async fn complete_file(
         }
     }
     // Start syncing this file now (dedupes by (rule, file_id) in the job table).
-    let cfg = dest_cfg.as_object().cloned().unwrap_or_default();
-    let account = cfg.get("account_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let folder = cfg.get("folder_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    if !account.is_empty() && !folder.is_empty() {
+    let has_folder = ["account_id", "folder_id"]
+        .iter()
+        .all(|k| dest_cfg.get(*k).and_then(|v| v.as_str()).is_some_and(|v| !v.is_empty()));
+    if has_folder {
         let db = state.db.clone();
         let mut redis = state.redis.clone();
         let fid = file_id.clone();
         tokio::spawn(async move {
-            let to_run = crate::sync::events::trigger_sync_for_upload(&db, &account, &folder, &[fid]).await;
+            let to_run = crate::sync::events::trigger_sync_for_upload(&db, &dest_cfg, &[(fid, name)]).await;
             for job_id in to_run {
                 let _ = queue::enqueue(&mut redis, RUN_SYNC_JOB, &job_id.to_string(), 0.0).await;
             }
@@ -540,16 +525,28 @@ pub async fn complete_session(
     let duration = started_at.map(|s| (Utc::now() - s).num_milliseconds() as f64 / 1000.0).unwrap_or(0.0);
     let link_name = row.get::<Option<String>, _>("brand_display_name")
         .filter(|s| !s.is_empty())
-        .or_else(|| row.get::<Option<String>, _>("destination_name"))
+        .or_else(|| row.get::<Option<String>, _>("name").filter(|s| !s.is_empty()))
         .unwrap_or_default();
-    let cfg = row.get::<Value, _>("destination_config").as_object().cloned().unwrap_or_default();
-    let account = cfg.get("account_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let folder = cfg.get("folder_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let file_ids: Vec<String> = entries.iter().filter_map(|e| e.get("file_id").and_then(|v| v.as_str()).map(|s| s.to_string())).collect();
+    let notify_to: Vec<String> = row.get::<Option<Value>, _>("notify_emails")
+        .and_then(|v| v.as_array().cloned())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+        .collect();
+    let link_folder: Value = row.get("link_folder");
+    let account = link_folder.get("account_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let folder = link_folder.get("folder_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let file_ids: Vec<(String, Option<String>)> = entries
+        .iter()
+        .filter_map(|e| {
+            let id = e.get("file_id").and_then(|v| v.as_str())?;
+            Some((id.to_string(), e.get("name").and_then(|n| n.as_str()).map(String::from)))
+        })
+        .collect();
 
     // Background: the completion email, the uploader's receipt and the sync trigger.
     let email_config = get_email_config(&state.db, &state.settings).await;
-    let brand = email_brand(&state.db, &state.settings).await;
+    let brand = email_brand_for(&state.db, &state.settings, row.get("brand_profile_id")).await;
     // The uploader's own receipt of what arrived (issue #86) — verified addresses only, see above.
     let receipt_to = verified_email.clone().filter(|_| first_completion && email_config.configured());
     if first_completion {
@@ -557,7 +554,7 @@ pub async fn complete_session(
             (email_config.clone(), brand.clone(), files.clone(), link_name.clone(), receipt_to.clone());
         tokio::spawn(async move {
             crate::notify::send_upload_completion(
-                &email_config, &link_name, uploader_name.as_deref(), uploader_email.as_deref(), uploader_message.as_deref(),
+                &email_config, &notify_to, &link_name, uploader_name.as_deref(), uploader_email.as_deref(), uploader_message.as_deref(),
                 &files, total, duration, &brand,
             ).await;
             if let Some(to) = receipt_to {
@@ -569,7 +566,7 @@ pub async fn complete_session(
         let db = state.db.clone();
         let mut redis = state.redis.clone();
         tokio::spawn(async move {
-            let to_run = crate::sync::events::trigger_sync_for_upload(&db, &account, &folder, &file_ids).await;
+            let to_run = crate::sync::events::trigger_sync_for_upload(&db, &link_folder, &file_ids).await;
             for job_id in to_run {
                 let _ = queue::enqueue(&mut redis, RUN_SYNC_JOB, &job_id.to_string(), 0.0).await;
             }

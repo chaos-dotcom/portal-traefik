@@ -11,6 +11,8 @@ export type PublicDownload = {
   viewer_fields_required: { name: boolean; email: boolean };
   verify_email: boolean;
   allow_preview: boolean;
+  // Count and size up front, for sends whose files were stored with the link (not folders).
+  summary: { files: number; bytes: number | null } | null;
 };
 
 export const load: PageLoad = async ({ params, fetch }) => {

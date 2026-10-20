@@ -93,34 +93,22 @@ pub enum PublicPage {
 /// the same names `GET /api/public/links/{token}` and `/api/public/downloads/{token}` return.
 async fn public_link_title(state: &AppState, page: PublicPage, token: &str) -> Option<String> {
     let nonempty = |v: Option<String>| v.filter(|s| !s.is_empty());
-    match page {
-        PublicPage::Upload => {
-            let row: (Option<String>, Option<String>) = sqlx::query_as(
-                "SELECT l.brand_display_name, d.display_name FROM upload_links l
-                   JOIN destinations d ON d.id = l.destination_id WHERE l.token = $1",
-            )
-            .bind(token)
-            .fetch_optional(&state.db)
-            .await
-            .ok()
-            .flatten()?;
-            let app: Option<String> = sqlx::query_scalar("SELECT brand_display_name FROM app_settings LIMIT 1")
-                .fetch_optional(&state.db)
-                .await
-                .ok()
-                .flatten()
-                .flatten();
-            Some(nonempty(row.0).or(nonempty(row.1)).or(nonempty(app)).unwrap_or_else(|| "Upload".into()))
-        }
-        PublicPage::Download => {
-            let brand: Option<String> = sqlx::query_scalar("SELECT brand_display_name FROM download_links WHERE token = $1")
-                .bind(token)
-                .fetch_optional(&state.db)
-                .await
-                .ok()?;
-            Some(nonempty(brand).unwrap_or_else(|| "Download".into()))
-        }
-    }
+    let kind = match page {
+        PublicPage::Upload => "upload",
+        PublicPage::Download => "download",
+    };
+    let row: (Option<String>, Option<uuid::Uuid>) = sqlx::query_as(
+        "SELECT brand_display_name, brand_profile_id FROM links WHERE kind = $1 AND token = $2",
+    )
+    .bind(kind)
+    .bind(token)
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten()?;
+    let brand = crate::services::runtime_config::link_brand(&state.db, &state.settings, row.1).await;
+    let fallback = if kind == "upload" { "Upload" } else { "Download" };
+    Some(nonempty(row.0).or(nonempty(brand.name)).unwrap_or_else(|| fallback.into()))
 }
 
 /// Serve the shell for `/u/{token}` and `/d/{token}` the way server rendering did: titled with

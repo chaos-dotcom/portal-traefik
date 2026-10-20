@@ -229,8 +229,11 @@ docker compose pull          # fetch the newer image (or bump PORTAL_VERSION in 
 docker compose up -d
 ```
 
-Or just `make update`. Migrations run automatically on startup; your data persists in the
-`portal_data` volume.
+Or just `make update` (or `./deploy.sh --update`), which first dumps the database to
+`portal-backup-<timestamp>.sql` and stops if that fails. Migrations run automatically on startup and
+can't be undone by an older image (a 2.x database won't start a 1.x image), so that dump is your way
+back. To update without it: `make update SKIP_BACKUP=1` / `PORTAL_SKIP_BACKUP=1 ./deploy.sh --update`.
+Your data persists in the `portal_data` volume.
 
 **Coming from a Python-based image** (the first Portal releases, which ran FastAPI + a Node web
 server): the Rust image picks up the same `/data` volume — database, secrets and sessions carry
@@ -253,5 +256,5 @@ Everything lives in the `portal_data` Docker volume (Postgres cluster, Redis AOF
 that volume up, or dump the database from inside the container:
 
 ```bash
-docker compose exec portal pg_dump -U portal portal > portal-backup.sql
+make backup   # → portal-backup-<timestamp>.sql, readable only by you
 ```

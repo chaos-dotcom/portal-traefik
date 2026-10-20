@@ -1,6 +1,7 @@
 <script lang="ts">
   import { goto } from "$app/navigation";
-  import { PageHeader, Button, Card, Modal, CopyButton } from "$lib/components";
+  import { PageHeader, Button, Card, Modal, CopyButton, ConfirmButton, Icon } from "$lib/components";
+  import { copyWithToast } from "$lib/toast.svelte";
 
   type Item = { id: string; name: string };
   type FileItem = { id: string; name: string; file_size: number | null };
@@ -152,8 +153,8 @@
   function fmtBytes(n: number | null): string {
     if (n == null) return "";
     const u = ["B", "KB", "MB", "GB", "TB"];
-    const i = n > 0 ? Math.floor(Math.log(n) / Math.log(1024)) : 0;
-    return `${(n / 1024 ** i).toFixed(i === 0 ? 0 : 1)} ${u[i]}`;
+    const i = n > 0 ? Math.floor(Math.log(n) / Math.log(1000)) : 0;
+    return `${(n / 1000 ** i).toFixed(i === 0 ? 0 : 1)} ${u[i]}`;
   }
 
   // ── actions ────────────────────────────────────────────────────────────────
@@ -175,9 +176,7 @@
     } finally { busy = false; }
   }
 
-  async function deleteProject(proj: Project, e: Event) {
-    e.stopPropagation();
-    if (!confirm(`Permanently delete project "${proj.name}" and ALL of its contents from Frame.io? This cannot be undone.`)) return;
+  async function deleteProject(proj: Project) {
     busy = true; error = null;
     try {
       const res = await fetch(`/api/frameio/projects/${proj.id}?account_id=${accountId}`, { method: "DELETE" });
@@ -251,7 +250,6 @@
   }
 
   async function deleteSelected() {
-    if (!confirm(`Permanently delete ${selCount} item${selCount === 1 ? "" : "s"} from Frame.io? This cannot be undone.`)) return;
     busy = true; error = null;
     try {
       for (const id of selectedFiles)
@@ -271,18 +269,24 @@
       });
       if (!res.ok) { error = (await res.json().catch(() => ({}))).detail ?? `Could not create link (${res.status})`; return; }
       const link = await res.json();
+      await copyWithToast(link.public_url, "Link created and copied. Adjust it here.");
       await goto(`/download-links/${link.id}`);
     } finally { busy = false; }
   }
 
+  // Names ride along in the source so the Links list can say what a link sends without asking Frame.io.
   function linkFromSelection() {
-    const ids = [...selectedFiles];
-    if (ids.length === 1) return createLink({ type: "file", account_id: accountId, file_id: ids[0] });
-    return createLink({ type: "selection", account_id: accountId, file_ids: ids });
+    const picked = files.filter((f) => selectedFiles.has(f.id));
+    const names = picked.map((f) => f.name);
+    const bytes = picked.reduce((n, f) => n + (f.file_size ?? 0), 0);
+    const label = picked.length === 1 ? names[0] : `${picked.length} files`;
+    const extra = { path: folderPath, names: names.slice(0, 50), bytes, label };
+    if (picked.length === 1) return createLink({ type: "file", account_id: accountId, file_id: picked[0].id, ...extra });
+    return createLink({ type: "selection", account_id: accountId, file_ids: picked.map((f) => f.id), ...extra });
   }
   function linkFromCurrentFolder() {
     if (!currentFolder) return;
-    return createLink({ type: "folder", account_id: accountId, folder_id: currentFolder.id, recursive: true });
+    return createLink({ type: "folder", account_id: accountId, folder_id: currentFolder.id, recursive: true, path: folderPath, label: currentFolder.name });
   }
 
   // ── Frame.io share links (native review page over files/folders) ─────────────
@@ -379,10 +383,13 @@
           <div class="ml-auto flex items-center gap-2">
             {#if clipboard}
               <Button variant="ghost" size="sm" onclick={paste} disabled={busy}>Paste {clipCount} ({clipboard.mode})</Button>
-              <button onclick={clearClipboard} class="text-xs text-faint hover:text-text" title="Clear clipboard">✕</button>
+              <button onclick={clearClipboard} class="text-faint hover:text-text" title="Clear clipboard" aria-label="Clear clipboard"><Icon name="x" size={14} /></button>
             {/if}
             <Button variant="ghost" size="sm" onclick={shareCurrentFolder} disabled={busy}>Frame.io share</Button>
-            <Button variant="ghost" size="sm" onclick={linkFromCurrentFolder} disabled={busy}>Download link</Button>
+            {#if currentFolder}
+              <Button variant="ghost" size="sm" href="/links/new?account_id={encodeURIComponent(accountId)}&folder_id={encodeURIComponent(currentFolder.id)}">Receive here</Button>
+            {/if}
+            <Button variant="ghost" size="sm" onclick={linkFromCurrentFolder} disabled={busy}>Send this folder</Button>
           </div>
         {:else}
           <span class="text-sm font-medium text-muted">Projects</span>
@@ -397,12 +404,12 @@
           <div class="ml-auto flex items-center gap-2">
             {#if selectedFiles.size > 0}
               <Button variant="ghost" size="sm" onclick={downloadSelected} disabled={busy}>Download</Button>
-              <Button variant="ghost" size="sm" onclick={linkFromSelection} disabled={busy}>Download link</Button>
+              <Button variant="ghost" size="sm" onclick={linkFromSelection} disabled={busy}>Send via Portal</Button>
             {/if}
             <Button variant="ghost" size="sm" onclick={shareFromSelection} disabled={busy}>Frame.io share</Button>
             <Button variant="ghost" size="sm" onclick={() => setClipboard("copy")} disabled={busy}>Copy</Button>
             <Button variant="ghost" size="sm" onclick={() => setClipboard("cut")} disabled={busy}>Cut</Button>
-            <Button variant="danger" size="sm" onclick={deleteSelected} disabled={busy}>Delete</Button>
+            <ConfirmButton label="Delete" confirmLabel="Delete {selCount} from Frame.io" onconfirm={deleteSelected} disabled={busy} class="border border-border text-danger" />
             <button onclick={clearSelection} class="text-xs text-faint hover:text-text">clear</button>
           </div>
         </div>
@@ -424,7 +431,7 @@
                   <path d="m9 18 6-6-6-6" />
                 </svg>
               </button>
-              <button onclick={(e) => deleteProject(proj, e)} disabled={busy} class="shrink-0 text-xs text-faint hover:text-danger" title="Delete project">Delete</button>
+              <ConfirmButton label="Delete" confirmLabel="Delete project and everything in it" onconfirm={() => deleteProject(proj)} disabled={busy} title="Delete project" />
             </div>
           {/each}
           {#if filteredProjects.length === 0 && !loading}
@@ -435,7 +442,7 @@
             <div class="flex items-center gap-3 px-4 py-2 text-sm hover:bg-surface-2 transition-colors">
               <input type="checkbox" checked={selectedFolders.has(sf.id)} onchange={() => (selectedFolders = toggle(selectedFolders, sf.id))} />
               <button onclick={() => drillInto(sf)} class="flex flex-1 items-center gap-2 text-left">
-                <span class="text-faint">📁</span>
+                <span class="text-faint"><Icon name="folder" /></span>
                 <span class="truncate font-medium">{sf.name}</span>
               </button>
             </div>
@@ -443,7 +450,7 @@
           {#each files as f (f.id)}
             <label class="flex cursor-pointer items-center gap-3 px-4 py-2 text-sm hover:bg-surface-2 transition-colors">
               <input type="checkbox" checked={selectedFiles.has(f.id)} onchange={() => (selectedFiles = toggle(selectedFiles, f.id))} />
-              <span class="text-faint">📄</span>
+              <span class="text-faint"><Icon name="file" /></span>
               <span class="flex-1 truncate">{f.name}</span>
               <span class="shrink-0 text-xs text-faint">{fmtBytes(f.file_size)}</span>
             </label>

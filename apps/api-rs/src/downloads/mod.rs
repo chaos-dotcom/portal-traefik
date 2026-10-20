@@ -15,6 +15,17 @@ pub struct ResolvedFile {
     pub media_type: Option<String>,
     pub thumbnail_url: Option<String>,
     pub path: String,
+    /// Frame.io's upload status, when the listing carries it ("uploaded", "transcoded", …).
+    pub status: Option<String>,
+}
+
+impl ResolvedFile {
+    /// Whether Frame.io can serve the original yet (unknown status counts as ready).
+    pub fn ready(&self) -> bool {
+        self.status
+            .as_deref()
+            .is_none_or(|s| crate::sync::runner::DOWNLOADABLE_STATUSES.contains(&s))
+    }
 }
 
 pub struct ResolvedSource {
@@ -35,6 +46,7 @@ fn file_from_value(v: &serde_json::Value) -> ResolvedFile {
         media_type: v.get("media_type").and_then(|x| x.as_str()).map(|s| s.to_string()),
         thumbnail_url: thumb,
         path: v.get("path").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+        status: v.get("status").and_then(|x| x.as_str()).map(|s| s.to_string()),
     }
 }
 

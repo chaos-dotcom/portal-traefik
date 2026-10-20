@@ -5,6 +5,7 @@ use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 use crate::frameio::webhooks::{parse_webhook_payload, SYNC_TRIGGER_EVENTS};
+use crate::services::sync_coverage::{load_rules, rules_covering, Rule};
 
 pub fn rule_matches(source_config: &serde_json::Value, payload: &crate::frameio::webhooks::WebhookPayload) -> bool {
     for (key, value) in [
@@ -38,7 +39,8 @@ pub fn is_sync_trigger(payload: &crate::frameio::webhooks::WebhookPayload) -> bo
 /// ignore the arrival — the moment we know the file is finalized — so the sync trailed the upload
 /// by up to a full poll (issue #85). Waking it is safe: the worker claims jobs atomically and drops
 /// the superseded poll (see `sync::worker::run_sync_job`).
-async fn job_to_run(db: &PgPool, rule_id: Uuid, file_id: &str) -> sqlx::Result<Option<(Uuid, bool)>> {
+/// `name` labels a new job until the worker resolves the file's real path (an upload knows it).
+async fn job_to_run(db: &PgPool, rule_id: Uuid, file_id: &str, name: Option<&str>) -> sqlx::Result<Option<(Uuid, bool)>> {
     let existing = sqlx::query("SELECT id, status FROM sync_jobs WHERE sync_rule_id = $1 AND frameio_file_id = $2")
         .bind(rule_id)
         .bind(file_id)
@@ -47,10 +49,11 @@ async fn job_to_run(db: &PgPool, rule_id: Uuid, file_id: &str) -> sqlx::Result<O
     match existing {
         None => {
             let id: Uuid = sqlx::query_scalar(
-                "INSERT INTO sync_jobs (sync_rule_id, frameio_file_id, status, retry_count) VALUES ($1,$2,'pending',0) RETURNING id",
+                "INSERT INTO sync_jobs (sync_rule_id, frameio_file_id, file_name, status, retry_count) VALUES ($1,$2,$3,'pending',0) RETURNING id",
             )
             .bind(rule_id)
             .bind(file_id)
+            .bind(name)
             .fetch_one(db)
             .await?;
             Ok(Some((id, true)))
@@ -75,7 +78,7 @@ async fn jobs_for_event(
         if !rule_matches(&source, payload) {
             continue;
         }
-        if let Some((id, is_new)) = job_to_run(db, r.get("id"), file_id).await? {
+        if let Some((id, is_new)) = job_to_run(db, r.get("id"), file_id, None).await? {
             if is_new { created.push(id) } else { woken.push(id) }
         }
     }
@@ -138,28 +141,21 @@ pub async fn process_event(db: &PgPool, event_id: Uuid) -> Vec<Uuid> {
 /// never races a not-yet-visible job.
 pub async fn trigger_sync_for_upload(
     db: &PgPool,
-    account_id: &str,
-    folder_id: &str,
-    file_ids: &[String],
+    folder: &serde_json::Value,
+    files: &[(String, Option<String>)],
 ) -> Vec<Uuid> {
-    if file_ids.is_empty() {
+    if files.is_empty() {
         return Vec::new();
     }
-    let rules = sqlx::query("SELECT id, source_config FROM sync_rules WHERE enabled")
-        .fetch_all(db)
-        .await
-        .unwrap_or_default();
+    let folder_id = folder.get("folder_id").and_then(|v| v.as_str()).unwrap_or("");
+    // Every enabled rule covering the link's folder: on the folder itself, or recursively on one
+    // of its parents (a link can deliver into a subfolder of what a rule watches).
+    let rules: Vec<Rule> = load_rules(db).await.into_iter().filter(|r| r.enabled).collect();
     let (mut created, mut woken) = (Vec::new(), Vec::new());
-    for r in rules {
-        let source: serde_json::Value = r.get("source_config");
-        if source.get("account_id").and_then(|v| v.as_str()) != Some(account_id)
-            || source.get("folder_id").and_then(|v| v.as_str()) != Some(folder_id)
-        {
-            continue;
-        }
-        let rule_id: Uuid = r.get("id");
-        for file_id in file_ids {
-            match job_to_run(db, rule_id, file_id).await {
+    for (rule, _) in rules_covering(folder, &rules) {
+        let rule_id = rule.id;
+        for (file_id, name) in files {
+            match job_to_run(db, rule_id, file_id, name.as_deref()).await {
                 Ok(Some((id, true))) => created.push(id),
                 Ok(Some((id, false))) => woken.push(id),
                 Ok(None) => {}

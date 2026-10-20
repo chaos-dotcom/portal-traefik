@@ -212,6 +212,7 @@ pub async fn run(state: AppState) -> anyhow::Result<()> {
     let mut last_reconcile = Instant::now() - reconcile_every; // reconcile once at startup
     let mut last_abandon = Instant::now();
     let mut last_retention = Instant::now();
+    let mut last_reminders = Instant::now() - Duration::from_secs(10 * 60); // check once at startup
     let mut inflight: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
     loop {
@@ -234,6 +235,10 @@ pub async fn run(state: AppState) -> anyhow::Result<()> {
         if last_abandon.elapsed() >= Duration::from_secs(15 * 60) {
             last_abandon = Instant::now();
             let _ = crate::services::upload_sessions::abandon_stale_upload_sessions(&state.db, &state.settings).await;
+        }
+        if last_reminders.elapsed() >= Duration::from_secs(10 * 60) {
+            last_reminders = Instant::now();
+            crate::services::reminders::send_due(&state).await;
         }
         if last_retention.elapsed() >= Duration::from_secs(24 * 60 * 60) {
             last_retention = Instant::now();

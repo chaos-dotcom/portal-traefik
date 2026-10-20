@@ -1,6 +1,6 @@
 import { redirect } from "@sveltejs/kit";
 import type { PageLoad } from "./$types";
-import type { PathSegment } from "../destinations/+page";
+import type { PathSegment } from "$lib/frameio";
 
 export type SyncRuleSource = {
   type?: string;
@@ -15,6 +15,17 @@ export type SyncRuleSource = {
   path?: PathSegment[];
 };
 
+// What a rule is doing (GET /api/sync-rules adds this to each rule).
+export type SyncActivity = {
+  counts: Partial<Record<"pending" | "running" | "waiting" | "done" | "skipped" | "dead_letter", number>>;
+  bytes_done: number;
+  last_done_at: string | null;
+  last_done_file: string | null;
+  running_file: string | null;
+  waiting_file: string | null;
+  failed_file: string | null;
+};
+
 export type SyncRule = {
   id: string;
   name: string;
@@ -25,6 +36,7 @@ export type SyncRule = {
   enabled: boolean;
   subscription_active: boolean;
   created_at: string;
+  activity?: SyncActivity;
 };
 
 export const load: PageLoad = async () => {

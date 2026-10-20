@@ -1,17 +1,26 @@
 
-//! Admin upload-link list — `portal.routes.upload_links` (`GET /api/upload-links`).
+//! Admin upload links — `portal.routes.upload_links` (`/api/upload-links`).
 //!
-//! Only the list endpoint is ported here; create/update/delete land with the rest of the admin
-//! CRUD. Field order and datetime formatting are part of the byte contract (see `pyfmt::iso`).
+//! Upload links are the `kind = 'upload'` rows of `links` (migration e1f2a3b4c5d6). A link
+//! delivers into its own Frame.io `folder` (`{type, account_id, workspace_id, project_id,
+//! folder_id, path}`). Datetime formatting follows `pyfmt::iso`.
 
-use axum::extract::State;
+use std::collections::HashMap;
+
+use axum::extract::{Path, Query, State};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use chrono::{DateTime, Utc};
 use serde_json::{json, Map, Value};
 use sqlx::Row;
+use uuid::Uuid;
 
 use crate::auth::Admin;
+use crate::error::detail;
+use crate::routes::link_options;
+use crate::services::frameio_paths::{clean_path, resolve_folder_path, stamp_path};
+use crate::state::AppState;
 
 /// `MEDIA_EXTENSIONS_PRESET` from `portal.uploads.links`.
 pub const MEDIA_EXTENSIONS_PRESET: [&str; 26] = [
@@ -19,10 +28,8 @@ pub const MEDIA_EXTENSIONS_PRESET: [&str; 26] = [
     "cdng", "exr", "dpx", "tiff", "tif", "png", "jpg", "jpeg", "wav", "aif", "aiff", "mp3",
     "bwf", "zip",
 ];
-use crate::error::detail;
-use crate::state::AppState;
 
-fn link_state(revoked_at: Option<DateTime<Utc>>, expires_at: Option<DateTime<Utc>>) -> &'static str {
+pub fn link_state(revoked_at: Option<DateTime<Utc>>, expires_at: Option<DateTime<Utc>>) -> &'static str {
     if revoked_at.is_some() {
         return "revoked";
     }
@@ -68,16 +75,17 @@ fn str_or_none(v: Option<&Value>) -> Option<String> {
     if s.is_empty() { None } else { Some(s.to_string()) }
 }
 
-const LINK_COLUMNS: &str = "SELECT l.id, l.token, l.expires_at, l.password_hash, l.max_file_size,
+/// The columns every admin view of an upload link reads.
+pub const LINK_COLUMNS: &str = "SELECT l.id, l.token, l.name, l.expires_at, l.password_hash, l.max_file_size,
         l.verify_email, l.allowed_extensions, l.uploader_fields_required, l.revoked_at,
         l.brand_display_name, l.brand_subtitle, l.created_at, l.target_folder_id,
-        l.target_folder_name, l.subfolder_template, l.destination_id,
-        d.display_name AS destination_name, d.config AS destination_config
-   FROM upload_links l JOIN destinations d ON d.id = l.destination_id";
+        l.target_folder_name, l.subfolder_template, l.folder, l.brand_profile_id,
+        l.notify_emails, l.remind_before_expiry
+   FROM links l WHERE l.kind = 'upload'";
 
 /// Render one link's `UploadLinkOut`, or None if it doesn't exist.
-async fn fetch_out(state: &AppState, id: uuid::Uuid) -> Option<Value> {
-    let row = sqlx::query(sqlx::AssertSqlSafe(format!("{LINK_COLUMNS} WHERE l.id = $1")))
+async fn fetch_out(state: &AppState, id: Uuid) -> Option<Value> {
+    let row = sqlx::query(sqlx::AssertSqlSafe(format!("{LINK_COLUMNS} AND l.id = $1")))
         .bind(id)
         .fetch_optional(&state.db)
         .await
@@ -86,7 +94,16 @@ async fn fetch_out(state: &AppState, id: uuid::Uuid) -> Option<Value> {
     Some(render_row(state, &row))
 }
 
-fn render_row(state: &AppState, row: &sqlx::postgres::PgRow) -> Value {
+/// The name the admin sees: its own, else the client-facing title, else the folder's name.
+pub fn effective_name(name: Option<String>, brand: Option<String>, folder: &Value) -> String {
+    let nonempty = |v: Option<String>| v.filter(|s| !s.trim().is_empty());
+    nonempty(name)
+        .or_else(|| nonempty(brand))
+        .or_else(|| folder.get("folder_name").and_then(|v| v.as_str()).map(|s| s.to_string()))
+        .unwrap_or_else(|| "Untitled".to_string())
+}
+
+pub fn render_row(state: &AppState, row: &sqlx::postgres::PgRow) -> Value {
     let token: String = row.get("token");
     let expires_at: Option<DateTime<Utc>> = row.get("expires_at");
     let revoked_at: Option<DateTime<Utc>> = row.get("revoked_at");
@@ -95,17 +112,18 @@ fn render_row(state: &AppState, row: &sqlx::postgres::PgRow) -> Value {
     let fields = fields.unwrap_or_else(|| json!({}));
     let flag = |k: &str| fields.get(k).and_then(|v| v.as_bool()).unwrap_or(false);
     let email = flag("email") || verify_email;
-    let dest_config: Value = row.get("destination_config");
+    let folder: Value = row.get::<Option<Value>, _>("folder").unwrap_or(Value::Null);
     let created_at: DateTime<Utc> = row.get("created_at");
+    let brand: Option<String> = row.get("brand_display_name");
     let base = state.settings.base_url.trim_end_matches('/');
-    json!({
-        "id": row.get::<uuid::Uuid, _>("id").to_string(),
+    let mut out = json!({
+        "id": row.get::<Uuid, _>("id").to_string(),
+        "kind": "upload",
+        "name": effective_name(row.get("name"), brand.clone(), &folder),
         "token": token,
         "public_url": format!("{base}/u/{token}"),
         "state": link_state(revoked_at, expires_at),
-        "destination_id": row.get::<uuid::Uuid, _>("destination_id").to_string(),
-        "destination_name": row.get::<String, _>("destination_name"),
-        "destination_path": dest_config.get("path").cloned().unwrap_or(Value::Null),
+        "folder": folder,
         "expires_at": expires_at.map(|d| crate::pyfmt::iso(&d)),
         "password_protected": row.get::<Option<String>, _>("password_hash").is_some(),
         "max_file_size": row.get::<Option<i64>, _>("max_file_size"),
@@ -115,18 +133,53 @@ fn render_row(state: &AppState, row: &sqlx::postgres::PgRow) -> Value {
         "target_folder_id": row.get::<Option<String>, _>("target_folder_id"),
         "target_folder_name": row.get::<Option<String>, _>("target_folder_name"),
         "subfolder_template": row.get::<Option<String>, _>("subfolder_template"),
-        "brand_display_name": row.get::<Option<String>, _>("brand_display_name"),
+        "brand_display_name": brand,
         "brand_subtitle": row.get::<Option<String>, _>("brand_subtitle"),
         "revoked_at": revoked_at.map(|d| crate::pyfmt::iso(&d)),
         "created_at": crate::pyfmt::iso(&created_at),
-    })
+    });
+    link_options::render(row, &mut out);
+    out
 }
 
 fn not_found() -> Response {
-    crate::error::detail(axum::http::StatusCode::NOT_FOUND, "Upload link not found")
+    detail(StatusCode::NOT_FOUND, "Upload link not found")
 }
 
-pub async fn get_link(State(state): State<AppState>, _: Admin, axum::extract::Path(id): axum::extract::Path<uuid::Uuid>) -> Response {
+/// Check a picked Frame.io folder and build the config stored on the link: ids, the folder's name
+/// from Frame.io, and the display breadcrumb (the picker's, else resolved best-effort).
+pub async fn validated_folder(state: &AppState, raw: &Value) -> Result<Value, Response> {
+    let get = |k: &str| str_or_none(raw.get(k));
+    let (Some(account_id), Some(folder_id)) = (get("account_id"), get("folder_id")) else {
+        return Err(detail(StatusCode::UNPROCESSABLE_ENTITY, "folder needs account_id and folder_id"));
+    };
+    let folder = match state.frameio.get_folder(&account_id, &folder_id).await {
+        Ok(f) => f,
+        Err(crate::frameio::FrameioError::NotConnected) => {
+            return Err(detail(StatusCode::CONFLICT, "Frame.io is not connected"))
+        }
+        Err(_) => return Err(detail(StatusCode::BAD_REQUEST, "Frame.io folder not found or inaccessible")),
+    };
+    let project_id = get("project_id").or(folder.project_id.clone()).unwrap_or_default();
+    let project_name = get("project_name");
+    let stored = json!({
+        "type": "frameio",
+        "account_id": account_id,
+        "workspace_id": get("workspace_id"),
+        "project_id": project_id,
+        "folder_id": folder_id,
+        "folder_name": folder.name,
+    });
+    if let Some(path) = clean_path(raw.get("path"), &folder_id) {
+        return Ok(stamp_path(&stored, &path, project_name.as_deref()));
+    }
+    if let Some((path, pn)) = resolve_folder_path(state, &account_id, &project_id, &folder_id).await {
+        return Ok(stamp_path(&stored, &path, pn.as_deref()));
+    }
+    Ok(stored)
+}
+
+pub async fn get_link(State(state): State<AppState>, _: Admin, Path(id): Path<Uuid>) -> Response {
     match fetch_out(&state, id).await {
         Some(v) => Json(v).into_response(),
         None => not_found(),
@@ -134,14 +187,22 @@ pub async fn get_link(State(state): State<AppState>, _: Admin, axum::extract::Pa
 }
 
 pub async fn create_link(State(state): State<AppState>, admin: Admin, Json(body): Json<Value>) -> Response {
-    let Some(dest_id) = body.get("destination_id").and_then(|v| v.as_str()).and_then(|v| uuid::Uuid::parse_str(v).ok()) else {
-        return crate::error::detail(axum::http::StatusCode::UNPROCESSABLE_ENTITY, "Field required");
+    // Where uploads land: the picked Frame.io folder.
+    let Some(raw) = body.get("folder").filter(|v| v.is_object()) else {
+        return detail(StatusCode::UNPROCESSABLE_ENTITY, "folder is required");
     };
-    let exists: Option<uuid::Uuid> = sqlx::query_scalar("SELECT id FROM destinations WHERE id = $1")
-        .bind(dest_id).fetch_optional(&state.db).await.ok().flatten();
-    if exists.is_none() {
-        return crate::error::detail(axum::http::StatusCode::BAD_REQUEST, "Destination not found");
-    }
+    let folder = match validated_folder(&state, raw).await {
+        Ok(f) => f,
+        Err(r) => return r,
+    };
+    let brand_profile = match link_options::brand_profile(&state, body.get("brand_profile_id")).await {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    let notify = match link_options::notify_emails(body.get("notify_emails")) {
+        Ok(n) => n,
+        Err(r) => return r,
+    };
     let password = body.get("password").and_then(|v| v.as_str()).filter(|p| !p.is_empty());
     let password_hash = match password {
         Some(p) => bcrypt::hash(p, bcrypt::DEFAULT_COST).ok(),
@@ -152,76 +213,86 @@ pub async fn create_link(State(state): State<AppState>, admin: Admin, Json(body)
     if verify_email {
         fields["email"] = json!(true);
     }
+    let brand = str_or_none(body.get("brand_display_name"));
+    let name = effective_name(str_or_none(body.get("name")), brand.clone(), &folder);
     let token = generate_token();
     let inserted = sqlx::query(
-        "INSERT INTO upload_links (token, destination_id, expires_at, password_hash, max_file_size,
-            allowed_extensions, uploader_fields_required, verify_email, target_folder_id,
-            target_folder_name, subfolder_template, brand_display_name, brand_subtitle)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id",
+        "INSERT INTO links (kind, token, name, folder, expires_at, password_hash, max_file_size,
+            allowed_extensions, uploader_fields_required, verify_email, subfolder_template,
+            brand_display_name, brand_subtitle, brand_profile_id, notify_emails, remind_before_expiry)
+         VALUES ('upload',$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING id",
     )
     .bind(&token)
-    .bind(dest_id)
+    .bind(&name)
+    .bind(&folder)
     .bind(body.get("expires_at").and_then(|v| v.as_str()).and_then(|s| DateTime::parse_from_rfc3339(s).ok()).map(|d| d.with_timezone(&Utc)))
     .bind(password_hash)
     .bind(body.get("max_file_size").and_then(|v| v.as_i64()))
     .bind(normalize_extensions(body.get("allowed_extensions")))
     .bind(&fields)
     .bind(verify_email)
-    .bind(str_or_none(body.get("target_folder_id")))
-    .bind(str_or_none(body.get("target_folder_name")))
     .bind(str_or_none(body.get("subfolder_template")))
-    .bind(body.get("brand_display_name").and_then(|v| v.as_str()).map(|s| s.to_string()))
+    .bind(brand)
     .bind(body.get("brand_subtitle").and_then(|v| v.as_str()).map(|s| s.to_string()))
+    .bind(brand_profile)
+    .bind(notify)
+    .bind(body.get("remind_before_expiry").and_then(|v| v.as_bool()).unwrap_or(false))
     .fetch_one(&state.db)
     .await;
-    let id: uuid::Uuid = match inserted {
+    let id: Uuid = match inserted {
         Ok(r) => r.get("id"),
         Err(e) => {
             tracing::error!("upload_links.create_failed: {e}");
-            return crate::error::detail(axum::http::StatusCode::INTERNAL_SERVER_ERROR, "Internal server error");
+            return detail(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error");
         }
     };
     let _ = sqlx::query("INSERT INTO audit_log (user_id, action, detail) VALUES ($1,'upload_link.created',$2)")
         .bind(admin.id)
-        .bind(json!({ "upload_link_id": id.to_string(), "destination_id": dest_id.to_string() }))
+        .bind(json!({ "upload_link_id": id.to_string(), "folder_id": folder.get("folder_id") }))
         .execute(&state.db).await;
     match fetch_out(&state, id).await {
-        Some(v) => (axum::http::StatusCode::CREATED, Json(v)).into_response(),
+        Some(v) => (StatusCode::CREATED, Json(v)).into_response(),
         None => not_found(),
     }
 }
 
-pub async fn update_link(State(state): State<AppState>, _: Admin, axum::extract::Path(id): axum::extract::Path<uuid::Uuid>, Json(body): Json<Map<String, Value>>) -> Response {
+pub async fn update_link(State(state): State<AppState>, _: Admin, Path(id): Path<Uuid>, Json(body): Json<Map<String, Value>>) -> Response {
     if fetch_out(&state, id).await.is_none() {
         return not_found();
     }
     // `exclude_unset`: only keys present in the body are applied.
-    if let Some(v) = body.get("destination_id").and_then(|v| v.as_str()).and_then(|v| uuid::Uuid::parse_str(v).ok()) {
-        let exists: Option<uuid::Uuid> = sqlx::query_scalar("SELECT id FROM destinations WHERE id = $1")
-            .bind(v).fetch_optional(&state.db).await.ok().flatten();
-        if exists.is_none() {
-            return crate::error::detail(axum::http::StatusCode::BAD_REQUEST, "Destination not found");
-        }
-        let _ = sqlx::query("UPDATE upload_links SET destination_id = $1 WHERE id = $2").bind(v).bind(id).execute(&state.db).await;
+    if let Some(raw) = body.get("folder").filter(|v| v.is_object()) {
+        let folder = match validated_folder(&state, raw).await {
+            Ok(f) => f,
+            Err(r) => return r,
+        };
+        // The folder is now exactly where uploads land: drop any older base-subfolder override.
+        let _ = sqlx::query(
+            "UPDATE links SET folder = $1, target_folder_id = NULL, target_folder_name = NULL WHERE id = $2",
+        )
+        .bind(&folder).bind(id).execute(&state.db).await;
+    }
+    if let Err(r) = link_options::apply_update(&state, id, &body).await {
+        return r;
     }
     if body.contains_key("password") {
         let pw = body.get("password").and_then(|v| v.as_str()).filter(|p| !p.is_empty());
         let hash = pw.and_then(|p| bcrypt::hash(p, bcrypt::DEFAULT_COST).ok());
-        let _ = sqlx::query("UPDATE upload_links SET password_hash = $1 WHERE id = $2").bind(hash).bind(id).execute(&state.db).await;
+        let _ = sqlx::query("UPDATE links SET password_hash = $1 WHERE id = $2").bind(hash).bind(id).execute(&state.db).await;
     }
     if body.contains_key("allowed_extensions") {
-        let _ = sqlx::query("UPDATE upload_links SET allowed_extensions = $1 WHERE id = $2")
+        let _ = sqlx::query("UPDATE links SET allowed_extensions = $1 WHERE id = $2")
             .bind(normalize_extensions(body.get("allowed_extensions")))
             .bind(id).execute(&state.db).await;
     }
     if body.contains_key("uploader_fields_required") {
-        let _ = sqlx::query("UPDATE upload_links SET uploader_fields_required = $1 WHERE id = $2")
+        let _ = sqlx::query("UPDATE links SET uploader_fields_required = $1 WHERE id = $2")
             .bind(body.get("uploader_fields_required").cloned().unwrap_or(json!({})))
             .bind(id).execute(&state.db).await;
     }
-    for key in ["target_folder_id", "target_folder_name", "subfolder_template"] {
+    for key in ["name", "target_folder_id", "target_folder_name", "subfolder_template"] {
         if body.contains_key(key) {
-            let _ = sqlx::query(sqlx::AssertSqlSafe(format!("UPDATE upload_links SET {key} = $1 WHERE id = $2")))
+            let _ = sqlx::query(sqlx::AssertSqlSafe(format!("UPDATE links SET {key} = $1 WHERE id = $2")))
                 .bind(str_or_none(body.get(key))).bind(id).execute(&state.db).await;
         }
     }
@@ -230,20 +301,20 @@ pub async fn update_link(State(state): State<AppState>, _: Admin, axum::extract:
             let v = body.get(key).unwrap();
             if key == "expires_at" {
                 let dt = v.as_str().and_then(|s| DateTime::parse_from_rfc3339(s).ok()).map(|d| d.with_timezone(&Utc));
-                let _ = sqlx::query("UPDATE upload_links SET expires_at = $1 WHERE id = $2").bind(dt).bind(id).execute(&state.db).await;
+                let _ = sqlx::query("UPDATE links SET expires_at = $1 WHERE id = $2").bind(dt).bind(id).execute(&state.db).await;
             } else if key == "max_file_size" {
-                let _ = sqlx::query("UPDATE upload_links SET max_file_size = $1 WHERE id = $2").bind(v.as_i64()).bind(id).execute(&state.db).await;
+                let _ = sqlx::query("UPDATE links SET max_file_size = $1 WHERE id = $2").bind(v.as_i64()).bind(id).execute(&state.db).await;
             } else if key == "verify_email" {
-                let _ = sqlx::query("UPDATE upload_links SET verify_email = $1 WHERE id = $2").bind(v.as_bool().unwrap_or(false)).bind(id).execute(&state.db).await;
+                let _ = sqlx::query("UPDATE links SET verify_email = $1 WHERE id = $2").bind(v.as_bool().unwrap_or(false)).bind(id).execute(&state.db).await;
             } else {
-                let _ = sqlx::query(sqlx::AssertSqlSafe(format!("UPDATE upload_links SET {key} = $1 WHERE id = $2"))).bind(v.as_str()).bind(id).execute(&state.db).await;
+                let _ = sqlx::query(sqlx::AssertSqlSafe(format!("UPDATE links SET {key} = $1 WHERE id = $2"))).bind(v.as_str()).bind(id).execute(&state.db).await;
             }
         }
     }
     // Verification implies the email field is required.
-    let verify: Option<bool> = sqlx::query_scalar("SELECT verify_email FROM upload_links WHERE id = $1").bind(id).fetch_optional(&state.db).await.ok().flatten();
+    let verify: Option<bool> = sqlx::query_scalar("SELECT verify_email FROM links WHERE id = $1").bind(id).fetch_optional(&state.db).await.ok().flatten();
     if verify == Some(true) {
-        let _ = sqlx::query("UPDATE upload_links SET uploader_fields_required = jsonb_set(COALESCE(uploader_fields_required, '{}'::jsonb), '{email}', 'true') WHERE id = $1").bind(id).execute(&state.db).await;
+        let _ = sqlx::query("UPDATE links SET uploader_fields_required = jsonb_set(COALESCE(uploader_fields_required, '{}'::jsonb), '{email}', 'true') WHERE id = $1").bind(id).execute(&state.db).await;
     }
     match fetch_out(&state, id).await {
         Some(v) => Json(v).into_response(),
@@ -251,13 +322,13 @@ pub async fn update_link(State(state): State<AppState>, _: Admin, axum::extract:
     }
 }
 
-pub async fn revoke_link(State(state): State<AppState>, admin: Admin, axum::extract::Path(id): axum::extract::Path<uuid::Uuid>) -> Response {
+pub async fn revoke_link(State(state): State<AppState>, admin: Admin, Path(id): Path<Uuid>) -> Response {
     if fetch_out(&state, id).await.is_none() {
         return not_found();
     }
-    let already: Option<DateTime<Utc>> = sqlx::query_scalar("SELECT revoked_at FROM upload_links WHERE id = $1").bind(id).fetch_optional(&state.db).await.ok().flatten();
+    let already: Option<DateTime<Utc>> = sqlx::query_scalar("SELECT revoked_at FROM links WHERE id = $1").bind(id).fetch_optional(&state.db).await.ok().flatten();
     if already.is_none() {
-        let _ = sqlx::query("UPDATE upload_links SET revoked_at = now() WHERE id = $1").bind(id).execute(&state.db).await;
+        let _ = sqlx::query("UPDATE links SET revoked_at = now(), updated_at = now() WHERE id = $1").bind(id).execute(&state.db).await;
         let _ = sqlx::query("INSERT INTO audit_log (user_id, action, detail) VALUES ($1,'upload_link.revoked',$2)")
             .bind(admin.id).bind(json!({ "upload_link_id": id.to_string() })).execute(&state.db).await;
     }
@@ -267,17 +338,34 @@ pub async fn revoke_link(State(state): State<AppState>, admin: Admin, axum::extr
     }
 }
 
-pub async fn delete_link(State(state): State<AppState>, admin: Admin, axum::extract::Path(id): axum::extract::Path<uuid::Uuid>) -> Response {
+/// `POST /api/upload-links/{id}/restore` — undo a revoke.
+pub async fn restore_link(State(state): State<AppState>, admin: Admin, Path(id): Path<Uuid>) -> Response {
     if fetch_out(&state, id).await.is_none() {
         return not_found();
     }
-    let _ = sqlx::query("DELETE FROM upload_links WHERE id = $1").bind(id).execute(&state.db).await;
-    let _ = sqlx::query("INSERT INTO audit_log (user_id, action, detail) VALUES ($1,'upload_link.deleted',$2)")
-        .bind(admin.id).bind(json!({ "upload_link_id": id.to_string() })).execute(&state.db).await;
-    axum::http::StatusCode::NO_CONTENT.into_response()
+    let res = sqlx::query("UPDATE links SET revoked_at = NULL, updated_at = now() WHERE id = $1 AND revoked_at IS NOT NULL")
+        .bind(id).execute(&state.db).await;
+    if res.map(|r| r.rows_affected()).unwrap_or(0) > 0 {
+        let _ = sqlx::query("INSERT INTO audit_log (user_id, action, detail) VALUES ($1,'upload_link.restored',$2)")
+            .bind(admin.id).bind(json!({ "upload_link_id": id.to_string() })).execute(&state.db).await;
+    }
+    match fetch_out(&state, id).await {
+        Some(v) => Json(v).into_response(),
+        None => not_found(),
+    }
 }
 
-pub async fn stats(State(state): State<AppState>, _: Admin, axum::extract::Path(id): axum::extract::Path<uuid::Uuid>) -> Response {
+pub async fn delete_link(State(state): State<AppState>, admin: Admin, Path(id): Path<Uuid>) -> Response {
+    if fetch_out(&state, id).await.is_none() {
+        return not_found();
+    }
+    let _ = sqlx::query("DELETE FROM links WHERE id = $1").bind(id).execute(&state.db).await;
+    let _ = sqlx::query("INSERT INTO audit_log (user_id, action, detail) VALUES ($1,'upload_link.deleted',$2)")
+        .bind(admin.id).bind(json!({ "upload_link_id": id.to_string() })).execute(&state.db).await;
+    StatusCode::NO_CONTENT.into_response()
+}
+
+pub async fn stats(State(state): State<AppState>, _: Admin, Path(id): Path<Uuid>) -> Response {
     if fetch_out(&state, id).await.is_none() {
         return not_found();
     }
@@ -291,78 +379,80 @@ pub async fn stats(State(state): State<AppState>, _: Admin, axum::extract::Path(
     })).into_response()
 }
 
-pub async fn list_links(State(state): State<AppState>, _: Admin) -> Response {
+/// `GET /api/upload-links/{id}/sessions` — the link's recent upload sessions, newest first:
+/// who, how many files, how much, and whether it finished.
+pub async fn sessions(State(state): State<AppState>, _: Admin, Path(id): Path<Uuid>, Query(q): Query<HashMap<String, String>>) -> Response {
+    if fetch_out(&state, id).await.is_none() {
+        return not_found();
+    }
+    let limit = q.get("limit").and_then(|v| v.parse::<i64>().ok()).unwrap_or(10).clamp(1, 100);
     let rows = sqlx::query(
-        "SELECT l.id, l.token, l.expires_at, l.password_hash, l.max_file_size, l.verify_email,
-                l.allowed_extensions, l.uploader_fields_required, l.revoked_at,
-                l.brand_display_name, l.brand_subtitle, l.created_at, l.target_folder_id,
-                l.target_folder_name, l.subfolder_template, l.destination_id,
-                d.display_name AS destination_name, d.config AS destination_config
-           FROM upload_links l
-           JOIN destinations d ON d.id = l.destination_id
-          ORDER BY l.created_at DESC",
+        "SELECT id, uploader_name, uploader_email, status, frameio_asset_ids, total_bytes, uploaded_bytes,
+                started_at, completed_at, last_activity_at, created_at
+           FROM upload_sessions
+          WHERE upload_link_id = $1
+            AND (status <> 'abandoned' OR jsonb_array_length(COALESCE(frameio_asset_ids, '[]'::jsonb)) > 0)
+          ORDER BY COALESCE(completed_at, last_activity_at, started_at, created_at) DESC
+          LIMIT $2",
     )
+    .bind(id)
+    .bind(limit)
     .fetch_all(&state.db)
-    .await;
+    .await
+    .unwrap_or_default();
+    let out: Vec<Value> = rows
+        .iter()
+        .map(|r| {
+            let files: Vec<Value> = r.get::<Option<Value>, _>("frameio_asset_ids").and_then(|v| v.as_array().cloned()).unwrap_or_default();
+            let planned: i64 = files.iter().filter_map(|f| f.get("size").and_then(|s| s.as_i64())).sum();
+            let iso = |k: &str| r.get::<Option<DateTime<Utc>>, _>(k).map(|d| crate::pyfmt::iso(&d));
+            json!({
+                "id": r.get::<Uuid, _>("id").to_string(),
+                "uploader_name": r.get::<Option<String>, _>("uploader_name"),
+                "uploader_email": r.get::<Option<String>, _>("uploader_email"),
+                "status": r.get::<String, _>("status"),
+                "files": files.len(),
+                "total_bytes": r.get::<Option<i64>, _>("total_bytes").or(if planned > 0 { Some(planned) } else { None }),
+                "uploaded_bytes": r.get::<Option<i64>, _>("uploaded_bytes"),
+                "started_at": iso("started_at"),
+                "completed_at": iso("completed_at"),
+                "last_activity_at": iso("last_activity_at"),
+            })
+        })
+        .collect();
+    Json(Value::Array(out)).into_response()
+}
 
-    let rows = match rows {
-        Ok(r) => r,
+pub async fn list_links(State(state): State<AppState>, _: Admin) -> Response {
+    let rows = sqlx::query(sqlx::AssertSqlSafe(format!("{LINK_COLUMNS} ORDER BY l.created_at DESC")))
+        .fetch_all(&state.db)
+        .await;
+    match rows {
+        Ok(rows) => Json(Value::Array(rows.iter().map(|r| render_row(&state, r)).collect())).into_response(),
         Err(e) => {
             tracing::error!("upload_links.list_failed: {e}");
-            return detail(
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                "Internal server error",
-            );
+            detail(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error")
         }
-    };
-
-    let mut out: Vec<Value> = Vec::with_capacity(rows.len());
-    for row in rows {
-        out.push(render_row(&state, &row));
     }
-    return Json(Value::Array(out)).into_response();
-    #[allow(unreachable_code)]
-    let base = state.settings.base_url.trim_end_matches('/').to_string();
-    let mut out2: Vec<Value> = Vec::with_capacity(0);
-    for row in Vec::<sqlx::postgres::PgRow>::new() {
-        let token: String = row.get("token");
-        let expires_at: Option<DateTime<Utc>> = row.get("expires_at");
-        let revoked_at: Option<DateTime<Utc>> = row.get("revoked_at");
-        let verify_email: bool = row.get("verify_email");
-        let fields: Option<Value> = row.get("uploader_fields_required");
-        let fields = fields.unwrap_or_else(|| json!({}));
-        let flag = |k: &str| fields.get(k).and_then(|v| v.as_bool()).unwrap_or(false);
-        let email = flag("email") || verify_email;
-        let dest_config: Value = row.get("destination_config");
-        let created_at: DateTime<Utc> = row.get("created_at");
+}
 
-        out.push(json!({
-            "id": row.get::<uuid::Uuid, _>("id").to_string(),
-            "token": token,
-            "public_url": format!("{base}/u/{token}"),
-            "state": link_state(revoked_at, expires_at),
-            "destination_id": row.get::<uuid::Uuid, _>("destination_id").to_string(),
-            "destination_name": row.get::<String, _>("destination_name"),
-            "destination_path": dest_config.get("path").cloned().unwrap_or(Value::Null),
-            "expires_at": expires_at.map(|d| crate::pyfmt::iso(&d)),
-            "password_protected": row.get::<Option<String>, _>("password_hash").is_some(),
-            "max_file_size": row.get::<Option<i64>, _>("max_file_size"),
-            "allowed_extensions": row.get::<Option<Value>, _>("allowed_extensions").unwrap_or(Value::Null),
-            "uploader_fields_required": {
-                "name": flag("name"),
-                "email": email,
-                "message": flag("message"),
-            },
-            "verify_email": verify_email,
-            "target_folder_id": row.get::<Option<String>, _>("target_folder_id"),
-            "target_folder_name": row.get::<Option<String>, _>("target_folder_name"),
-            "subfolder_template": row.get::<Option<String>, _>("subfolder_template"),
-            "brand_display_name": row.get::<Option<String>, _>("brand_display_name"),
-            "brand_subtitle": row.get::<Option<String>, _>("brand_subtitle"),
-            "revoked_at": revoked_at.map(|d| crate::pyfmt::iso(&d)),
-            "created_at": crate::pyfmt::iso(&created_at),
-        }));
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn effective_name_prefers_own_then_title_then_folder() {
+        let folder = json!({ "folder_name": "Day 3" });
+        assert_eq!(effective_name(Some("Cards".into()), Some("Send us".into()), &folder), "Cards");
+        assert_eq!(effective_name(Some("  ".into()), Some("Send us".into()), &folder), "Send us");
+        assert_eq!(effective_name(None, None, &folder), "Day 3");
+        assert_eq!(effective_name(None, None, &Value::Null), "Untitled");
     }
 
-    Json(Value::Array(out)).into_response()
+    #[test]
+    fn extensions_are_normalized() {
+        let v = json!([".MOV", "mov", " r3d ", ""]);
+        assert_eq!(normalize_extensions(Some(&v)), Some(json!(["mov", "r3d"])));
+        assert_eq!(normalize_extensions(Some(&json!([]))), None);
+    }
 }

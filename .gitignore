@@ -26,3 +26,6 @@ apps/web/build/
 
 # Claude Files
 .claude
+
+# Database dumps from `make backup` (production data; never commit)
+portal-backup-*.sql
