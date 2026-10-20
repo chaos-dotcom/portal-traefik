@@ -233,6 +233,18 @@ fi
 # survive. One compose file serves both modes, so update needs no mode awareness.
 if [[ $UPDATE -eq 1 ]]; then
   [[ -f .env ]] || die "--update needs an existing .env (run a normal deploy first)."
+  # Dump the database first: an update can migrate the schema one way (a 2.x database won't start
+  # a 1.x image), and restoring this dump is then the way back. Owner-only: it holds client data.
+  if [[ -n "${PORTAL_SKIP_BACKUP:-}" ]]; then
+    info "Skipping the database backup (PORTAL_SKIP_BACKUP is set)"
+  elif grep -qx portal <<<"$($DOCKER compose ps --status running --services 2>/dev/null || true)"; then
+    backup="portal-backup-$(date +%Y%m%d-%H%M%S).sql"
+    info "Backing up the database to $backup"
+    ( umask 077; $DOCKER compose exec -T portal pg_dump -U portal portal > "$backup" ) && [[ -s "$backup" ]] \
+      || { rm -f "$backup"; die "the database backup failed, so nothing was changed. Re-run with PORTAL_SKIP_BACKUP=1 to update without one."; }
+  else
+    die "Portal isn't running, so there's no database to back up. Start it ($DOCKER compose up -d) and re-run, or re-run with PORTAL_SKIP_BACKUP=1 to update without a backup."
+  fi
   info "Pulling newest image"
   $DOCKER compose pull
   ensure_sync_root

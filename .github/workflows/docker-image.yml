@@ -1,7 +1,8 @@
 name: Docker Image CI
 
-# Builds the all-in-one farbhaus/portal image. On branch pushes / PRs it builds only (validates
-# the Dockerfile). On a version tag (vX.Y.Z) it builds and PUSHES to Docker Hub.
+# Builds the all-in-one farbhaus/portal image and smoke-tests it (boots on a fresh volume, serves
+# the app, accepts a login). On branch pushes / PRs that's all. On a version tag (vX.Y.Z) it then
+# PUSHES to Docker Hub.
 #
 # Publishing prerequisites (see the "Going public / publishing" checklist in CLAUDE.md), all inert
 # until a v* tag is pushed:
@@ -49,13 +50,47 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build and (on a tag) push the all-in-one image
+      - name: Build the all-in-one image
         uses: docker/build-push-action@v7
         with:
           context: .
           file: ./Dockerfile
-          push: ${{ startsWith(github.ref, 'refs/tags/v') }}
+          load: true
+          tags: farbhaus/portal:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Boot it on a fresh volume and wait for the healthcheck, so an image that can't start (an
+      # entrypoint or schema-migration bug) fails here instead of on someone's server.
+      - name: Smoke test (fresh volume)
+        run: |
+          docker run -d --name portal-ci -p 127.0.0.1:18080:80 \
+            -e BASE_URL=http://127.0.0.1:18080 -e ADMIN_EMAIL=ci@example.com \
+            -e ADMIN_PASSWORD=ci-smoke-password -e SESSION_COOKIE_SECURE=false \
+            --health-cmd "curl -fsS -o /dev/null http://127.0.0.1:8000/api/health" \
+            --health-interval 3s --health-retries 40 \
+            farbhaus/portal:ci
+          status=starting
+          for i in $(seq 1 60); do
+            [ "$(docker inspect -f '{{.State.Running}}' portal-ci)" = true ] || break
+            status=$(docker inspect -f '{{.State.Health.Status}}' portal-ci)
+            [ "$status" = healthy ] && break
+            sleep 3
+          done
+          if [ "$status" != healthy ]; then docker logs portal-ci; exit 1; fi
+          docker logs portal-ci 2>&1 | grep -q "migrate: empty database"
+          curl -fsS -o /dev/null http://127.0.0.1:18080/login
+          curl -fsS -H 'content-type: application/json' \
+            -d '{"email":"ci@example.com","password":"ci-smoke-password"}' \
+            http://127.0.0.1:18080/api/auth/login | grep -q '"totp_required":false'
+
+      - name: Push the image (version tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max

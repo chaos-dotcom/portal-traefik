@@ -1,7 +1,8 @@
 ## Deployment topology
 
-Portal is one **all-in-one container** (api + sync worker + SvelteKit web + Postgres + Redis,
-managed internally by supervisord). It runs in either of two modes:
+Portal is one **all-in-one container**: the Portal service (one Rust binary serving the API and the
+web app, plus the sync worker), Postgres and Redis, managed internally by supervisord. It runs in
+either of two modes:
 
 **Standalone** — the container's internal Caddy is the public TLS edge and provisions a Let's
 Encrypt certificate itself. One container owns ports 80/443; nothing else to install:
@@ -11,7 +12,7 @@ Encrypt certificate itself. One container owns ports 80/443; nothing else to ins
                   │  :443  (Let's Encrypt, auto-provisioned)
       ┌───────────▼────────────────────────────────────┐
       │  farbhaus/portal  (one container)               │
-      │   internal Caddy :443 → api :8000 / web :3000   │
+      │   internal Caddy :443 → portal :8000 (API + web)│
       │   + sync worker, Postgres, Redis                │
       │   all state in the /data volume                 │
       └─────────────────────────────────────────────────┘
@@ -31,7 +32,7 @@ services without claiming 80/443):
                   │  http → 127.0.0.1:${PORTAL_PORT}   (default 18080)
       ┌───────────▼────────────────────────────────────┐
       │  farbhaus/portal  (one container)               │
-      │   internal Caddy :80 → api :8000 / web :3000    │
+      │   internal Caddy :80 → portal :8000 (API + web) │
       │   + sync worker, Postgres, Redis                │
       └─────────────────────────────────────────────────┘
 ```
@@ -197,6 +198,25 @@ curl -s https://portal.example.com/api/health      # {"status":"ok","db":true,"r
    shown as connected. (Requires the Adobe redirect URI to match — see the **Adobe Developer Console
    setup** section in the [README](README.md#adobe-developer-console-setup-for-frameio-oauth).)
 3. While in Settings you can also set SMTP (for email notifications) and upload your brand logo.
+   Use **Send test email** to check it.
+
+### Email (SMTP)
+
+Portal sends email verification codes, upload notifications and uploaders' delivery receipts. Most
+mail providers that use two-factor sign-in **reject your account password over SMTP** and require
+an **app-specific password** instead:
+
+| Provider | Host / port | Username | Password |
+|---|---|---|---|
+| iCloud Mail | `smtp.mail.me.com` : 587, STARTTLS | your iCloud address | app-specific password (account.apple.com → Sign-In and Security → App-Specific Passwords; looks like `xxxx-xxxx-xxxx-xxxx`) |
+| Gmail / Google Workspace | `smtp.gmail.com` : 587, STARTTLS | your Google address | app password (Google Account → Security → 2-Step Verification → App passwords) |
+
+If the test email fails with *"the mail server rejected the username or password"* (SMTP `535` in
+`docker compose logs portal`), the password isn't a valid app-specific one: your account password
+was entered (or a password manager filled it in), or the app-specific password was revoked — Apple
+revokes all of them whenever the Apple ID password is changed or reset. Generate a new one and save
+it in Settings. The **From address** must be one the account may send as (your iCloud address, or a
+custom-domain address set up for it).
 
 If the connect fails, check `docker compose logs portal` (Portal never shows provider internals in
 the UI). The most common cause is a redirect-URI mismatch.
@@ -209,14 +229,23 @@ docker compose pull          # fetch the newer image (or bump PORTAL_VERSION in 
 docker compose up -d
 ```
 
-Or just `make update`. Migrations run automatically on startup; your data persists in the
-`portal_data` volume.
+Or just `make update` (or `./deploy.sh --update`), which first dumps the database to
+`portal-backup-<timestamp>.sql` and stops if that fails. Migrations run automatically on startup and
+can't be undone by an older image (a 2.x database won't start a 1.x image), so that dump is your way
+back. To update without it: `make update SKIP_BACKUP=1` / `PORTAL_SKIP_BACKUP=1 ./deploy.sh --update`.
+Your data persists in the `portal_data` volume.
+
+**Coming from a Python-based image** (the first Portal releases, which ran FastAPI + a Node web
+server): the Rust image picks up the same `/data` volume — database, secrets and sessions carry
+over. It migrates a database from schema revision `b8c9d0e1f2a3` onwards; if it refuses an older
+one at startup (the log names the revision), run the last Python-based release once to bring the
+database up to date, then switch.
 
 ## Useful commands
 
 ```bash
 docker compose ps                  # status
-docker compose logs -f portal      # logs (JSON from the api; supervisord-managed services)
+docker compose logs -f portal      # logs (the Portal service + supervisord-managed services)
 docker compose down                # stop (keeps the portal_data volume / your data)
 docker compose down -v             # stop and DELETE the data volume (destructive)
 ```
@@ -227,5 +256,5 @@ Everything lives in the `portal_data` Docker volume (Postgres cluster, Redis AOF
 that volume up, or dump the database from inside the container:
 
 ```bash
-docker compose exec portal pg_dump -U portal portal > portal-backup.sql
+make backup   # → portal-backup-<timestamp>.sql, readable only by you
 ```

@@ -24,10 +24,13 @@
   --color-surface: #16181d;
   --color-surface-2: #1c1f26;
   --color-surface-3: #232730;
-  --color-border: #2a2e37;
-  --color-border-strong: #3a3f4b;
+  /* Borders are white at low alpha so one border reads on every surface (base, card, raised). */
+  --color-border: #ffffff17;
+  --color-border-strong: #ffffff2b;
 
-  --color-text: #e7e9ee;
+  /* Four text tiers: titles, body, secondary, hints. */
+  --color-text: #f3f4f7;
+  --color-body: #c9cdd6;
   --color-muted: #9aa1ad;
   --color-faint: #6b7280;
 
@@ -133,6 +136,25 @@ a:focus-visible {
 .animate-pulse-dot {
   animation: pulse-dot 1.4s ease-in-out infinite;
 }
+
+/* A status dot for something happening right now: amber with a soft ring that breathes. */
+.live-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 9999px;
+  background: var(--color-accent);
+  box-shadow: 0 0 0 3px var(--color-accent-soft);
+  flex: none;
+}
+@media (prefers-reduced-motion: no-preference) {
+  @keyframes live-ring {
+    50% { box-shadow: 0 0 0 5px #f59e0b14; }
+  }
+  .live-dot { animation: live-ring 1.8s ease-in-out infinite; }
+}
+
+/* Numbers that line up in columns. */
+.tnum { font-variant-numeric: tabular-nums; }
 
 /* Skeleton shimmer for loading states */
 @keyframes shimmer {

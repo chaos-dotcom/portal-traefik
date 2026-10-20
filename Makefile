@@ -1,7 +1,7 @@
 # Portal — thin wrappers around the all-in-one image (production + dev).
 #
 #   make deploy    start Portal (creates .env on first run; ./deploy.sh <domain> is the one-click path)
-#   make update    pull the newest image and recreate (data + live transfers survive)
+#   make update    back up the database, then pull the newest image and recreate
 #   make down      stop Portal (keeps the data volume)
 #   make logs      follow logs
 #   make status    per-process supervisord state inside the container
@@ -9,8 +9,8 @@
 #   make shell     open a shell in the container
 #   make dev       same as deploy, but build the image from source instead of pulling it
 #   make build     build the all-in-one image locally
-#   make check     run static checks (ruff, mypy, svelte-check)
-#   make test      run the backend test suite (spins throwaway Postgres/Redis)
+#   make check     run static checks (clippy, svelte-check, ruff, mypy)
+#   make test      run the Rust tests + schema check, and the Python reference suite
 #
 # `deploy`/`update` pull the published image; `dev` adds a --build overlay
 # (docker/docker-compose.dev.yml) so the same compose builds from source. See DEPLOY.md.
@@ -33,7 +33,13 @@ deploy:  ## Start Portal (pulls the image; creates .env on first run)
 		exit 1; }
 	docker compose up -d
 
-update:  ## Pull the newest image and recreate (data + live transfers survive)
+# An update can migrate the schema one way (a 2.x database won't start a 1.x image), so it backs up
+# first: restoring that dump is the way back. SKIP_BACKUP=1 updates without one.
+update:  ## Back up the database, then pull the newest image and recreate (data + live transfers survive)
+	@if [ -n "$(SKIP_BACKUP)" ]; then echo "Skipping the backup (SKIP_BACKUP is set)."; \
+	elif docker compose ps --status running --services 2>/dev/null | grep -qx portal; then $(MAKE) --no-print-directory backup; \
+	else echo "Portal isn't running, so there's no database to back up. Start it with 'make deploy' and re-run," >&2; \
+		echo "or run 'make update SKIP_BACKUP=1' to update without a backup." >&2; exit 1; fi
 	docker compose pull
 	docker compose up -d
 
@@ -49,8 +55,12 @@ logs:  ## Follow logs
 status:  ## Per-process supervisord state inside the container
 	docker compose exec portal supervisorctl status
 
+# Owner-only: the dump holds client names, emails and transfer history.
 backup:  ## Dump the database to portal-backup-<timestamp>.sql
-	docker compose exec -T portal pg_dump -U portal portal > portal-backup-$$(date +%Y%m%d-%H%M%S).sql
+	@f=portal-backup-$$(date +%Y%m%d-%H%M%S).sql; umask 077; \
+	if docker compose exec -T portal pg_dump -U portal portal > $$f && [ -s $$f ]; then \
+		echo "Backed up the database to $$f ($$(du -h $$f | cut -f1))"; \
+	else rm -f $$f; echo "Backup failed; nothing was changed." >&2; exit 1; fi
 
 shell:  ## Open a shell in the container
 	docker compose exec portal bash
@@ -63,11 +73,14 @@ dev:  ## Same as deploy, but build the image from source instead of pulling it
 build:  ## Build the all-in-one image locally (farbhaus/portal:dev)
 	docker build -t farbhaus/portal:dev .
 
-check:  ## Run static checks (ruff, mypy, svelte-check)
-	cd apps/api && uv run ruff check && uv run mypy src
+check:  ## Run static checks (clippy, svelte-check, ruff, mypy)
+	cd apps/api-rs && cargo clippy --locked --all-targets -- -D warnings
 	cd apps/web && npm run check
+	cd apps/api && uv run ruff check && uv run mypy src
 
-test:  ## Run the backend test suite (spins throwaway Postgres/Redis)
+test:  ## Run the Rust tests + schema check, and the Python reference suite (throwaway Postgres/Redis)
+	cd apps/api-rs && cargo test --locked
+	tools/rustify/schema_check.sh
 	docker run -d --rm -p 55432:5432 -e POSTGRES_USER=portal -e POSTGRES_PASSWORD=portal -e POSTGRES_DB=portal --name portal_test_pg postgres:16 >/dev/null && \
 	docker run -d --rm -p 56379:6379 --name portal_test_redis redis:7 >/dev/null && \
 	(cd apps/api && uv run pytest); rc=$$?; \

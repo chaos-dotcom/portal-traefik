@@ -1,191 +1,277 @@
 <script lang="ts">
   import { invalidateAll } from "$app/navigation";
-  import { Card, Button, StatusPill, CopyButton } from "$lib/components";
+  import { onMount } from "svelte";
+  import { Icon } from "$lib/components";
   import { formatBytes } from "$lib/format";
-  import type { RecentTransfer } from "./+page.server";
+  import { onLiveChange, refreshOnChange } from "$lib/live.svelte";
+  import { fmtDuration, fmtSpeed, timeAgo, whenFull, type LinkItem } from "$lib/links";
+  import { errorDetail, toast } from "$lib/toast.svelte";
+  import type { ActiveSync, ActiveUpload, HistoryItem, SyncHealth } from "./+page";
 
   let { data } = $props();
+  const uploads = $derived(data.transfers.active_uploads as ActiveUpload[]);
+  const syncs = $derived(data.transfers.active_syncs as ActiveSync[]);
+  const health = $derived(data.transfers.sync_health as SyncHealth);
+  const links = $derived(data.links as LinkItem[]);
 
-  const active = $derived(data.transfers.active_uploads);
-  const recent = $derived(data.transfers.recent as RecentTransfer[]);
-  const health = $derived(data.transfers.sync_health);
+  // The page reloads on every live change; a slow timer only if the event stream can't connect.
+  $effect(() => refreshOnChange(uploads.length || syncs.length ? 8000 : 30_000));
 
-  // Sync jobs queued or downloading right now.
-  const syncing = $derived(health.running + health.queued);
+  // ── live rows ───────────────────────────────────────────────────────────
+  function uploadProgress(u: ActiveUpload) {
+    const done = u.uploaded_bytes ?? 0;
+    const pct = u.total_bytes ? Math.min(100, (100 * done) / u.total_bytes) : null;
+    const secs = u.started_at && u.last_activity_at ? (Date.parse(u.last_activity_at) - Date.parse(u.started_at)) / 1000 : 0;
+    const bps = secs >= 1 && done > 0 ? done / secs : null;
+    const eta = bps && u.total_bytes && u.total_bytes > done ? fmtDuration((u.total_bytes - done) / bps) : null;
+    return { done, pct, bps, eta };
+  }
 
-  // Live-refresh while anything is in flight: briskly while files upload or sync jobs are queued
-  // or downloading, gently while jobs only wait on Frame.io (or the share), then go quiet.
-  // Stopping the moment the upload finished froze the dashboard while its last files were still
-  // syncing to the NAS, so it read "done" minutes early (issue #85).
-  const refreshMs = $derived(
-    active.length > 0 || syncing > 0 ? 4000 : health.waiting > 0 ? 30_000 : 0,
+  // ── expiring soon ───────────────────────────────────────────────────────
+  const SOON = 3 * 86_400_000;
+  const expiring = $derived(
+    links
+      .filter((l) => l.state === "ok" && l.expires_at && Date.parse(l.expires_at) - Date.now() < SOON)
+      .sort((a, b) => Date.parse(a.expires_at!) - Date.parse(b.expires_at!)),
   );
-  // A hidden tab doesn't poll (each tick re-runs every load on the page); it catches up the moment
-  // it's shown again.
-  $effect(() => {
-    if (!refreshMs) return;
-    let busy = false;
-    const refresh = async () => {
-      if (document.hidden || busy) return;
-      busy = true;
-      try {
-        await invalidateAll();
-      } finally {
-        busy = false;
-      }
-    };
-    const t = setInterval(refresh, refreshMs);
-    document.addEventListener("visibilitychange", refresh);
-    return () => {
-      clearInterval(t);
-      document.removeEventListener("visibilitychange", refresh);
-    };
+  function untilText(iso: string): string {
+    const ms = Date.parse(iso) - Date.now();
+    if (ms < 3_600_000) return `in ${Math.max(1, Math.round(ms / 60_000))}m`;
+    if (ms < 86_400_000) return `in ${Math.round(ms / 3_600_000)}h`;
+    const days = Math.round(ms / 86_400_000);
+    return days === 1 ? "tomorrow" : `in ${days} days`;
+  }
+  async function extend(l: LinkItem) {
+    const end = new Date();
+    end.setDate(end.getDate() + 7);
+    end.setHours(23, 59, 0, 0);
+    const res = await fetch(`/api/${l.kind === "upload" ? "upload-links" : "download-links"}/${l.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ expires_at: end.toISOString() }),
+    });
+    if (!res.ok) return toast(await errorDetail(res, "Could not extend"), { kind: "error" });
+    toast(`“${l.name}” is open for 7 more days`);
+    await invalidateAll();
+  }
+
+  // ── history ─────────────────────────────────────────────────────────────
+  let q = $state("");
+  let kind = $state<"all" | "upload" | "download" | "sync">("all");
+  let items = $state<HistoryItem[]>([]);
+  let hasMore = $state(false);
+  let loading = $state(true);
+  let loadingMore = $state(false);
+  let seq = 0;
+  const PAGE = 40;
+
+  async function fetchHistory(limit: number, offset = 0) {
+    const p = new URLSearchParams({ kind, limit: String(limit), offset: String(offset) });
+    if (q.trim()) p.set("q", q.trim());
+    const res = await fetch(`/api/dashboard/history?${p}`);
+    if (!res.ok) throw new Error("Could not load history");
+    return (await res.json()) as { items: HistoryItem[]; has_more: boolean };
+  }
+  async function reloadHistory(keep = false) {
+    const my = ++seq;
+    if (!keep) loading = true;
+    try {
+      const r = await fetchHistory(Math.max(PAGE, keep ? items.length : 0));
+      if (my !== seq) return;
+      items = r.items;
+      hasMore = r.has_more;
+    } catch {
+      /* the next change retries */
+    } finally {
+      if (my === seq) loading = false;
+    }
+  }
+  async function loadMore() {
+    loadingMore = true;
+    try {
+      const r = await fetchHistory(PAGE, items.length);
+      items = [...items, ...r.items];
+      hasMore = r.has_more;
+    } finally {
+      loadingMore = false;
+    }
+  }
+  let searchTimer: ReturnType<typeof setTimeout> | undefined;
+  function onSearch() {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => void reloadHistory(), 250);
+  }
+  onMount(() => {
+    void reloadHistory();
+    return onLiveChange(() => void reloadHistory(true));
   });
 
-  const fmtBytes = (n: number | null): string => (n == null ? "—" : formatBytes(n));
-
-  function timeAgo(iso: string): string {
-    const s = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
-    if (s < 60) return "just now";
-    const m = Math.floor(s / 60);
-    if (m < 60) return `${m}m ago`;
-    const h = Math.floor(m / 60);
-    if (h < 24) return `${h}h ago`;
-    return `${Math.floor(h / 24)}d ago`;
+  async function exportCsv() {
+    const r = await fetchHistory(1000);
+    const cell = (v: unknown) => {
+      let s = v == null ? "" : String(v);
+      // Names and file names come from clients: a leading = + - @ would run as a formula in a
+      // spreadsheet, so it's quoted as text.
+      if (typeof v === "string" && /^[=+\-@\t\r]/.test(s)) s = `'${s}`;
+      return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+    const kindName = { upload: "Received", download: "Sent", sync: "To NAS" } as const;
+    const lines = [
+      ["When", "Type", "Name", "Who", "Files", "Bytes", "Status"].join(","),
+      ...r.items.map((i) => [i.at, kindName[i.kind], i.label, i.kind === "download" && i.via ? `${i.who ?? ""} via ${i.via}` : i.who, i.files ?? "", i.bytes ?? "", statusWord(i)].map(cell).join(",")),
+    ];
+    const blob = new Blob([lines.join("\n")], { type: "text/csv" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `portal-history-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+    toast(`Exported ${r.items.length} row${r.items.length === 1 ? "" : "s"}${r.has_more ? " (the newest 1000)" : ""}`);
   }
 
-  function shortUrl(url: string): string {
-    try { return new URL(url).pathname; } catch { return url; }
+  function statusWord(i: HistoryItem): string {
+    if (i.kind === "upload") return i.status === "completed" ? "Received" : "Didn't finish";
+    if (i.kind === "download") return i.status === "completed" ? "Downloaded" : "Started";
+    return { done: "Copied", dead_letter: "Failed", skipped: "Skipped" }[i.status] ?? i.status;
   }
+  const statusTone = (i: HistoryItem) =>
+    i.status === "dead_letter" ? "text-danger" : i.status === "incomplete" || i.status === "skipped" || i.status === "in_progress" ? "text-warning" : "text-muted";
+  const kindIcon = { upload: "receive", download: "send", sync: "nas" } as const;
+  const href = (i: HistoryItem) =>
+    i.kind === "upload" && i.link_id ? `/upload-links/${i.link_id}` : i.kind === "download" && i.link_id ? `/download-links/${i.link_id}` : i.rule_id ? `/sync-rules/${i.rule_id}` : null;
 
-  const kindMeta: Record<string, { label: string; cls: string }> = {
-    upload: { label: "↑ Upload", cls: "text-info" },
-    download: { label: "↓ Download", cls: "text-accent" },
-    sync: { label: "⇄ Sync", cls: "text-muted" },
-  };
+  const syncActive = $derived(health.running + health.queued);
+  const quiet = $derived(!uploads.length && !syncs.length);
 </script>
 
-<div class="space-y-6">
-  <div class="flex flex-wrap items-center justify-between gap-2">
+<div class="space-y-6 text-[13px]">
+  <div class="flex flex-wrap items-center gap-3">
     <h1 class="text-xl font-semibold tracking-tight">Dashboard</h1>
-    <a
-      href="/settings"
-      class="inline-flex shrink-0 items-center gap-2 rounded-full border border-border px-3 py-1 text-xs font-medium {data.connected
-        ? 'text-success'
-        : 'text-warning'}"
-    >
+    <span class="flex-1"></span>
+    <a href="/settings" class="inline-flex items-center gap-2 rounded-full border border-border px-3 py-1 text-xs font-medium {data.connected ? 'text-success' : 'text-warning'}">
       <span class="h-1.5 w-1.5 rounded-full {data.connected ? 'bg-success' : 'bg-warning'}"></span>
       Frame.io {data.connected ? "connected" : "not connected"}
     </a>
   </div>
 
-  <!-- Live transfers -->
-  {#if active.length > 0}
-    <Card class="border-accent/30">
-      <div class="mb-3 flex items-center gap-2">
-        <span class="h-2 w-2 rounded-full bg-accent animate-pulse-dot"></span>
-        <h2 class="text-sm font-semibold">Uploading now</h2>
-        <span class="text-xs text-faint">({active.length})</span>
-      </div>
-      <div class="space-y-2">
-        {#each active as u (u.id)}
-          <div class="flex items-center justify-between gap-4 text-sm">
-            <div class="min-w-0">
-              <span class="font-medium">{u.brand ?? "Upload"}</span>
-              {#if u.who}<span class="text-muted"> · {u.who}</span>{/if}
-            </div>
-            <div class="shrink-0 text-xs text-muted">
-              {#if u.uploaded_bytes != null}{fmtBytes(u.uploaded_bytes)} of {/if}{fmtBytes(
-                u.total_bytes
-              )}{#if u.started_at} · started {timeAgo(u.started_at)}{/if}
-            </div>
-          </div>
-        {/each}
-      </div>
-    </Card>
-  {/if}
-
-  <!-- Sync health strip -->
-  <div class="grid grid-cols-2 gap-3 sm:grid-cols-4">
-    <!-- Background refreshes update these numbers in place — no skeleton flash every few seconds. -->
-    {#snippet stat(label: string, value: number, tone: string)}
-        <div class="rounded-card border border-border bg-surface px-4 py-3">
-          <div class="text-2xl font-semibold {tone}">{value}</div>
-          <div class="mt-0.5 text-xs text-muted">{label}</div>
-        </div>
-      {/snippet}
-      {@render stat("Synced (24h)", health.done_24h, "text-text")}
-      {@render stat("In progress", syncing, syncing ? "text-info" : "text-text")}
-      {@render stat("Waiting", health.waiting, health.waiting ? "text-warning" : "text-text")}
-      {@render stat("Failed", health.dead_letter, health.dead_letter ? "text-danger" : "text-text")}
-  </div>
-
-  {#if health.dead_letter > 0}
-    <!-- Link to the rule that failed: its job list is the only place the error and the
-         retry/dismiss actions live. Falls back to the rules index if the rule is gone. -->
-    <a
-      href={health.dead_letter_rule_id ? `/sync-rules/${health.dead_letter_rule_id}` : "/sync"}
-      class="block rounded-card border border-danger/40 bg-danger/10 px-4 py-2.5 text-sm text-danger hover:bg-danger/15"
-    >
-      {health.dead_letter} sync job{health.dead_letter > 1 ? "s" : ""} failed and need attention →
-    </a>
-  {/if}
-
-  <!-- Quick links: upload + download, side by side on desktop, stacked on mobile -->
-  {#snippet linkList(title: string, href: string, links: { id: string; public_url: string; brand_display_name?: string | null }[])}
-    <Card padded={false}>
-      <div class="flex items-center justify-between border-b border-border px-5 py-3">
-        <h2 class="text-sm font-semibold">{title}</h2>
-        <a href={href} class="text-xs text-muted hover:text-text">All →</a>
-      </div>
-      {#if links.length === 0}
-        <p class="px-5 py-6 text-center text-xs text-muted">No active links.</p>
-      {:else}
-        <div class="divide-y divide-border/60">
-          {#each links.slice(0, 5) as l (l.id)}
-            <div class="flex items-center justify-between gap-2 px-5 py-2.5">
-              <div class="min-w-0">
-                <div class="truncate text-sm font-medium">{l.brand_display_name ?? "Untitled"}</div>
-                <CopyButton value={l.public_url} label={shortUrl(l.public_url)} class="text-xs" />
-              </div>
-              <Button href={l.public_url} target="_blank" rel="noopener" variant="ghost" size="sm">Open</Button>
-            </div>
-          {/each}
-        </div>
-      {/if}
-    </Card>
-  {/snippet}
-
-  <div class="grid gap-6 sm:grid-cols-2">
-    {@render linkList("Upload links", "/upload-links", data.activeUpload)}
-    {@render linkList("Download links", "/download-links", data.activeDownload)}
-  </div>
-
-  <!-- Recent feed -->
-  <Card padded={false}>
-    <div class="flex items-center justify-between border-b border-border px-5 py-3">
-      <h2 class="text-sm font-semibold">Recent transfers</h2>
-      <a href="/history" class="text-xs text-muted hover:text-text">Full history →</a>
+  <!-- now -->
+  <section>
+    <div class="mb-2 flex items-center gap-2">
+      {#if !quiet}<span class="live-dot"></span>{/if}
+      <h2 class="text-sm font-semibold">{quiet ? "Nothing moving right now" : "Happening now"}</h2>
     </div>
-    {#if recent.length === 0}
-      <p class="px-5 py-10 text-center text-sm text-muted">No transfers yet.</p>
-    {:else}
-      <div class="max-h-[calc(100vh-30rem)] divide-y divide-border/60 overflow-y-auto">
-        {#each recent as r (r.kind + r.id)}
-          <div class="flex items-center justify-between gap-4 px-5 py-2.5 text-sm">
-            <div class="flex min-w-0 items-center gap-3">
-              <span class="w-20 shrink-0 text-xs font-medium {kindMeta[r.kind]?.cls}">{kindMeta[r.kind]?.label}</span>
-              <span class="truncate">{r.label ?? "—"}</span>
-              {#if r.who}<span class="hidden truncate text-muted sm:inline">· {r.who}</span>{/if}
-            </div>
-            <div class="flex shrink-0 items-center gap-2">
-              <span class="hidden text-xs text-faint sm:inline">{fmtBytes(r.bytes)}</span>
-              {#if r.kind === "sync" || r.status === "incomplete"}<span class="hidden sm:block"><StatusPill status={r.status} /></span>{/if}
-              <span class="text-right text-xs text-faint">{timeAgo(r.at)}</span>
-            </div>
-          </div>
+    {#if !quiet}
+      <div class="overflow-hidden rounded-xl border border-border bg-surface">
+        {#each uploads as u (u.id)}
+          {@const p = uploadProgress(u)}
+          <a href={u.link_id ? `/upload-links/${u.link_id}` : "/links"} class="grid grid-cols-[30px_minmax(0,1fr)] items-center gap-x-3 gap-y-1.5 border-b border-border px-4 py-3 last:border-b-0 hover:bg-white/[0.02] md:grid-cols-[30px_minmax(0,1.3fr)_minmax(140px,1fr)_auto]">
+            <span class="grid h-[30px] w-[30px] place-items-center rounded-md border border-border bg-surface-2 text-body"><Icon name="receive" /></span>
+            <span class="min-w-0">
+              <span class="block truncate font-medium text-text">{u.brand ?? "Upload"}</span>
+              <span class="block truncate text-xs text-faint">{u.who ?? "Someone"} is uploading</span>
+            </span>
+            <span class="col-span-2 grid gap-1 md:col-span-1">
+              <span class="relative h-1 overflow-hidden rounded-full bg-surface-3"><i class="absolute inset-y-0 left-0 rounded-full bg-accent transition-[width] duration-500" style="width:{p.pct ?? 6}%"></i></span>
+              <span class="tnum text-xs text-faint">{formatBytes(p.done)}{u.total_bytes ? ` of ${formatBytes(u.total_bytes)}` : ""}</span>
+            </span>
+            <span class="tnum col-span-2 text-xs text-muted md:col-span-1 md:text-right">{fmtSpeed(p.bps)}{p.eta ? ` · ` : ""}{#if p.eta}<span class="text-text">{p.eta} left</span>{/if}</span>
+          </a>
+        {/each}
+        {#each syncs as j (j.id)}
+          <a href="/sync-rules/{j.rule_id}" class="grid grid-cols-[30px_minmax(0,1fr)_auto] items-center gap-3 border-b border-border px-4 py-2.5 last:border-b-0 hover:bg-white/[0.02]">
+            <span class="grid h-[30px] w-[30px] place-items-center rounded-md border border-border bg-surface-2 text-body"><Icon name="nas" /></span>
+            <span class="min-w-0">
+              <span class="block truncate {j.file ? 'text-text' : 'text-muted'}" title={j.file ?? ""}>{j.file ?? "A new file from Frame.io"}</span>
+              <span class="block truncate text-xs text-faint">To the NAS · {j.rule}</span>
+            </span>
+            <span class="inline-flex items-center gap-2 text-xs {j.status === 'running' ? 'text-text' : 'text-muted'}">
+              {#if j.status === "running"}<span class="live-dot"></span>Copying{:else}<span class="h-[7px] w-[7px] rounded-full bg-info"></span>Queued{/if}
+            </span>
+          </a>
         {/each}
       </div>
     {/if}
-  </Card>
+  </section>
+
+  <!-- health -->
+  <section class="flex flex-wrap items-center gap-x-5 gap-y-2 rounded-xl border border-border bg-surface px-4 py-3">
+    <span class="flex items-center gap-2"><span class="tnum text-base font-semibold text-text">{health.done_24h}</span><span class="text-muted">copied to the NAS in 24h</span></span>
+    <a href="/sync" class="flex items-center gap-2 hover:text-text"><span class="tnum text-base font-semibold {syncActive ? 'text-info' : 'text-text'}">{syncActive}</span><span class="text-muted">copying or queued</span></a>
+    <a href="/sync" class="flex items-center gap-2 hover:text-text"><span class="tnum text-base font-semibold {health.waiting ? 'text-warning' : 'text-text'}">{health.waiting}</span><span class="text-muted">waiting on Frame.io</span></a>
+    <a href={health.dead_letter_rule_id ? `/sync-rules/${health.dead_letter_rule_id}` : "/sync"} class="flex items-center gap-2 hover:text-text">
+      <span class="tnum text-base font-semibold {health.dead_letter ? 'text-danger' : 'text-text'}">{health.dead_letter}</span><span class="text-muted">failed{health.dead_letter ? ", needs a look" : ""}</span>
+    </a>
+  </section>
+
+  <!-- expiring soon -->
+  {#if expiring.length}
+    <section>
+      <h2 class="mb-2 text-sm font-semibold">Expiring soon</h2>
+      <div class="overflow-hidden rounded-xl border border-border bg-surface">
+        {#each expiring as l (l.id)}
+          <div class="flex items-center gap-3 border-b border-border px-4 py-2.5 last:border-b-0">
+            <span class="grid h-[30px] w-[30px] shrink-0 place-items-center rounded-md border border-border bg-surface-2 text-body"><Icon name={l.kind === "upload" ? "receive" : "send"} /></span>
+            <a href={l.kind === "upload" ? `/upload-links/${l.id}` : `/download-links/${l.id}`} class="min-w-0 flex-1 hover:text-accent-hover">
+              <span class="block truncate font-medium text-text">{l.name}</span>
+              <span class="tnum block text-xs text-warning sm:hidden">Closes {untilText(l.expires_at!)}</span>
+            </a>
+            <span class="tnum hidden shrink-0 text-warning sm:inline" title={whenFull(l.expires_at)}>Closes {untilText(l.expires_at!)}</span>
+            <button type="button" class="h-7 shrink-0 rounded-md border border-border px-2.5 text-xs font-medium text-text hover:bg-surface-3" onclick={() => extend(l)}>Extend 7 days</button>
+          </div>
+        {/each}
+      </div>
+    </section>
+  {/if}
+
+  <!-- history -->
+  <section id="history" class="scroll-mt-24">
+    <div class="mb-2 flex flex-wrap items-center gap-2.5">
+      <h2 class="mr-2 text-sm font-semibold">History</h2>
+      <label class="relative flex w-full items-center sm:w-64">
+        <span class="pointer-events-none absolute left-2.5 text-faint"><Icon name="search" /></span>
+        <input bind:value={q} oninput={onSearch} type="text" placeholder="Search names, people, files" aria-label="Search history" class="h-8 w-full rounded-md border border-border bg-bg pr-2 pl-8 outline-none focus:border-accent" />
+      </label>
+      <div class="inline-flex gap-0.5 rounded-md border border-border bg-surface p-0.5" role="group" aria-label="Type">
+        {#each [["all", "All"], ["upload", "Received"], ["download", "Sent"], ["sync", "To NAS"]] as [k, l] (k)}
+          <button type="button" class="h-[26px] rounded px-2.5 font-medium {kind === k ? 'bg-surface-3 text-text' : 'text-muted hover:text-text'}" onclick={() => { kind = k as typeof kind; void reloadHistory(); }}>{l}</button>
+        {/each}
+      </div>
+      <span class="flex-1"></span>
+      <button type="button" class="inline-flex h-8 items-center gap-1.5 rounded-md border border-border bg-surface-2 px-3 font-medium text-text hover:bg-surface-3" onclick={exportCsv}>Export CSV</button>
+      <a href="/activity" class="text-xs text-muted hover:text-text">Admin log</a>
+    </div>
+
+    <div class="overflow-hidden rounded-xl border border-border bg-surface">
+      {#if loading}
+        <p class="px-4 py-10 text-center text-faint">Loading…</p>
+      {:else}
+        {#each items as i (i.kind + i.id)}
+          {@const to = href(i)}
+          <svelte:element
+            this={to ? "a" : "div"}
+            href={to}
+            class="grid grid-cols-[30px_minmax(0,1fr)_auto] items-center gap-x-3 border-b border-border px-4 py-2 last:border-b-0 sm:grid-cols-[30px_minmax(0,1.4fr)_minmax(0,1fr)_80px_110px_96px] {to ? 'hover:bg-white/[0.02]' : ''}"
+          >
+            <span class="grid h-[30px] w-[30px] place-items-center rounded-md border border-border bg-surface-2 text-body"><Icon name={kindIcon[i.kind]} /></span>
+            <span class="min-w-0">
+              <span class="block truncate text-text" title={i.label ?? ""}>{i.label ?? "—"}</span>
+              <span class="block truncate text-xs text-faint sm:hidden">{i.who ?? ""}</span>
+              {#if i.error && i.status === "dead_letter"}<span class="block truncate text-xs text-danger" title={i.error}>{i.error}</span>{/if}
+            </span>
+            <span class="hidden min-w-0 truncate text-muted sm:block" title={i.who ?? ""}>{i.who ?? "—"}{#if i.kind === "download" && i.via}<span class="text-faint"> · {i.via}</span>{/if}</span>
+            <span class="tnum hidden text-right text-muted sm:block">{i.bytes != null ? formatBytes(i.bytes) : ""}</span>
+            <span class="hidden truncate text-xs sm:block {statusTone(i)}">{statusWord(i)}{i.kind === "upload" && i.files ? ` · ${i.files} file${i.files === 1 ? "" : "s"}` : ""}</span>
+            <span class="text-right text-xs text-faint" title={whenFull(i.at)}>{timeAgo(i.at)}</span>
+          </svelte:element>
+        {:else}
+          <p class="px-4 py-10 text-center text-faint">{q.trim() ? `Nothing matches “${q}”.` : "Nothing here yet."}</p>
+        {/each}
+      {/if}
+    </div>
+    {#if hasMore && !loading}
+      <div class="mt-3 text-center">
+        <button type="button" class="h-8 rounded-md border border-border px-4 font-medium text-text hover:bg-surface-3 disabled:opacity-50" disabled={loadingMore} onclick={loadMore}>{loadingMore ? "Loading…" : "Show more"}</button>
+      </div>
+    {/if}
+  </section>
 </div>

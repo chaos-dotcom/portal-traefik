@@ -1,15 +1,17 @@
 // Small presentation helpers shared across pages so byte/colour formatting lives in one place.
 
+// Decimal units (1 GB = 1,000,000,000 bytes), the way Frame.io and Finder count, so a file shows
+// the same size here as there.
 export function formatBytes(n: number): string {
-  if (n < 1024) return `${n} B`;
-  const units = ["KB", "MB", "GB", "TB"];
-  let v = n / 1024;
+  if (n < 1000) return `${n} B`;
+  const units = ["KB", "MB", "GB", "TB", "PB"];
+  let v = n / 1000;
   let i = 0;
-  while (v >= 1024 && i < units.length - 1) {
-    v /= 1024;
+  while (v >= 1000 && i < units.length - 1) {
+    v /= 1000;
     i++;
   }
-  return `${v.toFixed(1)} ${units[i]}`;
+  return `${v >= 100 ? v.toFixed(0) : v.toFixed(1)} ${units[i]}`;
 }
 
 // Pick readable foreground text (near-black or white) for a hex accent background, by luminance.
