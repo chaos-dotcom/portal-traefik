@@ -353,7 +353,7 @@ pub async fn update_link(State(state): State<AppState>, _: Admin, Path(id): Path
     let new_trigger = trigger_change.clone().unwrap_or_else(|| old_trigger.clone());
 
     if folder_changed || trigger_change.is_some() {
-        if let Some(old) = &old_trigger {
+        if old_trigger.is_some() {
             let backend = FrameioStorageBackend::new(state.frameio.clone());
             let old_dest = destination_for(&old_folder, old_target.as_deref());
             if let Err(e) = backend.remove_turbosort(&old_dest).await {
