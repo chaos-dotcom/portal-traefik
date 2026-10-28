@@ -32,6 +32,8 @@ export type UploadLink = LinkBase & {
   allowed_extensions: string[] | null;
   uploader_fields_required: { name: boolean; email: boolean; message: boolean };
   subfolder_template: string | null;
+  // Project Zeus: the Live_Work folder this link's uploads belong to (null = no marker).
+  turbosort: string | null;
 };
 
 export type DownloadLink = LinkBase & {
