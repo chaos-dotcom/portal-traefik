@@ -21,6 +21,8 @@ use crate::error::detail;
 use crate::routes::link_options;
 use crate::services::frameio_paths::{clean_path, resolve_folder_path, stamp_path};
 use crate::state::AppState;
+use crate::storage::frameio_backend::FrameioStorageBackend;
+use crate::storage::DestinationConfig;
 
 /// `MEDIA_EXTENSIONS_PRESET` from `portal.uploads.links`.
 pub const MEDIA_EXTENSIONS_PRESET: [&str; 26] = [
@@ -75,6 +77,43 @@ fn str_or_none(v: Option<&Value>) -> Option<String> {
     if s.is_empty() { None } else { Some(s.to_string()) }
 }
 
+/// Project Zeus `.turbosort`: one Live_Work folder name, no path separators.
+fn clean_turbosort(value: &str) -> Result<String, Response> {
+    let v = value.trim();
+    if v.is_empty() {
+        return Err(detail(StatusCode::UNPROCESSABLE_ENTITY, "Project Zeus folder must not be empty"));
+    }
+    if v == "." || v == ".." || v.contains('/') || v.contains('\\') || v.contains('\n') || v.contains('\r') {
+        return Err(detail(StatusCode::UNPROCESSABLE_ENTITY, "Project Zeus folder must be a single folder name"));
+    }
+    Ok(v.to_string())
+}
+
+fn turbosort_of(folder: &Value) -> Option<String> {
+    folder.get("turbosort").and_then(|v| v.as_str()).map(|s| s.to_string())
+}
+
+/// The Frame.io destination a link writes to, with an optional legacy target-folder override.
+fn destination_for(folder: &Value, target_folder_id: Option<&str>) -> DestinationConfig {
+    let mut data = folder.clone();
+    if let Some(fid) = target_folder_id
+        && let Some(obj) = data.as_object_mut() {
+            obj.insert("folder_id".to_string(), json!(fid));
+        }
+    let t = data.get("type").and_then(|v| v.as_str()).unwrap_or("frameio").to_string();
+    DestinationConfig::new(&t, data)
+}
+
+/// Write the Project Zeus marker into the link's Frame.io folder. The one broad sync rule carries
+/// it down to the NAS, where Project Zeus scans for it.
+async fn write_trigger(state: &AppState, dest: &DestinationConfig, content: &str) -> Result<(), Response> {
+    let backend = FrameioStorageBackend::new(state.frameio.clone());
+    backend.replace_turbosort(dest, content).await.map_err(|e| {
+        tracing::warn!("upload_links.turbosort_write_failed: {e:?}");
+        detail(StatusCode::BAD_GATEWAY, "Could not write the Project Zeus marker to Frame.io")
+    })
+}
+
 /// The columns every admin view of an upload link reads.
 pub const LINK_COLUMNS: &str = "SELECT l.id, l.token, l.name, l.expires_at, l.password_hash, l.max_file_size,
         l.verify_email, l.allowed_extensions, l.uploader_fields_required, l.revoked_at,
@@ -113,6 +152,7 @@ pub fn render_row(state: &AppState, row: &sqlx::postgres::PgRow) -> Value {
     let flag = |k: &str| fields.get(k).and_then(|v| v.as_bool()).unwrap_or(false);
     let email = flag("email") || verify_email;
     let folder: Value = row.get::<Option<Value>, _>("folder").unwrap_or(Value::Null);
+    let turbosort = turbosort_of(&folder);
     let created_at: DateTime<Utc> = row.get("created_at");
     let brand: Option<String> = row.get("brand_display_name");
     let base = state.settings.base_url.trim_end_matches('/');
@@ -124,6 +164,7 @@ pub fn render_row(state: &AppState, row: &sqlx::postgres::PgRow) -> Value {
         "public_url": format!("{base}/u/{token}"),
         "state": link_state(revoked_at, expires_at),
         "folder": folder,
+        "turbosort": turbosort,
         "expires_at": expires_at.map(|d| crate::pyfmt::iso(&d)),
         "password_protected": row.get::<Option<String>, _>("password_hash").is_some(),
         "max_file_size": row.get::<Option<i64>, _>("max_file_size"),
@@ -191,7 +232,7 @@ pub async fn create_link(State(state): State<AppState>, admin: Admin, Json(body)
     let Some(raw) = body.get("folder").filter(|v| v.is_object()) else {
         return detail(StatusCode::UNPROCESSABLE_ENTITY, "folder is required");
     };
-    let folder = match validated_folder(&state, raw).await {
+    let mut folder = match validated_folder(&state, raw).await {
         Ok(f) => f,
         Err(r) => return r,
     };
@@ -215,6 +256,23 @@ pub async fn create_link(State(state): State<AppState>, admin: Admin, Json(body)
     }
     let brand = str_or_none(body.get("brand_display_name"));
     let name = effective_name(str_or_none(body.get("name")), brand.clone(), &folder);
+    let turbosort = match body.get("turbosort") {
+        Some(Value::Null) => None,
+        Some(Value::String(s)) if s.trim().is_empty() => None,
+        Some(Value::String(s)) => match clean_turbosort(s) {
+            Ok(v) => Some(v),
+            Err(r) => return r,
+        },
+        Some(_) => return detail(StatusCode::UNPROCESSABLE_ENTITY, "Project Zeus folder must be a string"),
+        None => None,
+    };
+    if let Some(ts) = &turbosort {
+        folder["turbosort"] = json!(ts);
+        let dest = destination_for(&folder, None);
+        if let Err(r) = write_trigger(&state, &dest, ts).await {
+            return r;
+        }
+    }
     let token = generate_token();
     let inserted = sqlx::query(
         "INSERT INTO links (kind, token, name, folder, expires_at, password_hash, max_file_size,
@@ -257,20 +315,73 @@ pub async fn create_link(State(state): State<AppState>, admin: Admin, Json(body)
 }
 
 pub async fn update_link(State(state): State<AppState>, _: Admin, Path(id): Path<Uuid>, Json(body): Json<Map<String, Value>>) -> Response {
-    if fetch_out(&state, id).await.is_none() {
-        return not_found();
-    }
+    let raw = match sqlx::query("SELECT folder, target_folder_id FROM links WHERE id = $1")
+        .bind(id)
+        .fetch_optional(&state.db)
+        .await
+    {
+        Ok(Some(r)) => r,
+        Ok(None) => return not_found(),
+        Err(e) => {
+            tracing::error!("upload_links.update_load_failed: {e}");
+            return detail(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error");
+        }
+    };
+    let old_folder: Value = raw.get::<Option<Value>, _>("folder").unwrap_or(Value::Null);
+    let old_target: Option<String> = raw.get("target_folder_id");
+    let old_trigger = turbosort_of(&old_folder);
+
     // `exclude_unset`: only keys present in the body are applied.
-    if let Some(raw) = body.get("folder").filter(|v| v.is_object()) {
-        let folder = match validated_folder(&state, raw).await {
+    let folder_changed = body.get("folder").filter(|v| v.is_object()).is_some();
+    let mut new_folder = match body.get("folder").filter(|v| v.is_object()) {
+        Some(raw_folder) => match validated_folder(&state, raw_folder).await {
             Ok(f) => f,
             Err(r) => return r,
-        };
-        // The folder is now exactly where uploads land: drop any older base-subfolder override.
-        let _ = sqlx::query(
-            "UPDATE links SET folder = $1, target_folder_id = NULL, target_folder_name = NULL WHERE id = $2",
-        )
-        .bind(&folder).bind(id).execute(&state.db).await;
+        },
+        None => old_folder.clone(),
+    };
+    let trigger_change: Option<Option<String>> = match body.get("turbosort") {
+        Some(Value::Null) => Some(None),
+        Some(Value::String(s)) if s.trim().is_empty() => Some(None),
+        Some(Value::String(s)) => match clean_turbosort(s) {
+            Ok(v) => Some(Some(v)),
+            Err(r) => return r,
+        },
+        Some(_) => return detail(StatusCode::UNPROCESSABLE_ENTITY, "Project Zeus folder must be a string"),
+        None => None,
+    };
+    let new_trigger = trigger_change.clone().unwrap_or_else(|| old_trigger.clone());
+
+    if folder_changed || trigger_change.is_some() {
+        if let Some(old) = &old_trigger {
+            let backend = FrameioStorageBackend::new(state.frameio.clone());
+            let old_dest = destination_for(&old_folder, old_target.as_deref());
+            if let Err(e) = backend.remove_turbosort(&old_dest).await {
+                tracing::warn!("upload_links.turbosort_remove_failed: {e:?}");
+            }
+        }
+        if let Some(new) = &new_trigger {
+            let new_dest = destination_for(&new_folder, if folder_changed { None } else { old_target.as_deref() });
+            if let Err(r) = write_trigger(&state, &new_dest, new).await {
+                return r;
+            }
+        }
+        if let Some(obj) = new_folder.as_object_mut() {
+            match &new_trigger {
+                Some(ts) => { obj.insert("turbosort".to_string(), json!(ts)); }
+                None => { obj.remove("turbosort"); }
+            }
+        }
+        if folder_changed {
+            // The folder is now exactly where uploads land: drop any older base-subfolder override.
+            let _ = sqlx::query(
+                "UPDATE links SET folder = $1, target_folder_id = NULL, target_folder_name = NULL WHERE id = $2",
+            )
+            .bind(&new_folder).bind(id).execute(&state.db).await;
+        } else if trigger_change.is_some() {
+            let _ = sqlx::query("UPDATE links SET folder = $1 WHERE id = $2")
+                .bind(&new_folder).bind(id).execute(&state.db).await;
+        }
     }
     if let Err(r) = link_options::apply_update(&state, id, &body).await {
         return r;
@@ -356,8 +467,26 @@ pub async fn restore_link(State(state): State<AppState>, admin: Admin, Path(id):
 }
 
 pub async fn delete_link(State(state): State<AppState>, admin: Admin, Path(id): Path<Uuid>) -> Response {
-    if fetch_out(&state, id).await.is_none() {
-        return not_found();
+    let raw = match sqlx::query("SELECT folder, target_folder_id FROM links WHERE id = $1")
+        .bind(id)
+        .fetch_optional(&state.db)
+        .await
+    {
+        Ok(Some(r)) => r,
+        Ok(None) => return not_found(),
+        Err(e) => {
+            tracing::error!("upload_links.delete_load_failed: {e}");
+            return detail(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error");
+        }
+    };
+    let folder: Value = raw.get::<Option<Value>, _>("folder").unwrap_or(Value::Null);
+    let target: Option<String> = raw.get("target_folder_id");
+    if turbosort_of(&folder).is_some() {
+        let backend = FrameioStorageBackend::new(state.frameio.clone());
+        let dest = destination_for(&folder, target.as_deref());
+        if let Err(e) = backend.remove_turbosort(&dest).await {
+            tracing::warn!("upload_links.turbosort_remove_failed: {e:?}");
+        }
     }
     let _ = sqlx::query("DELETE FROM links WHERE id = $1").bind(id).execute(&state.db).await;
     let _ = sqlx::query("INSERT INTO audit_log (user_id, action, detail) VALUES ($1,'upload_link.deleted',$2)")
