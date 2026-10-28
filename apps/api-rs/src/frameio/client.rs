@@ -502,6 +502,61 @@ impl FrameioClient {
         ))
     }
 
+    /// Upload a small in-memory file (a marker, not media) straight to its presigned chunks and
+    /// wait for Frame.io to finish processing it. Returns the file id.
+    pub async fn upload_bytes(
+        &self,
+        account_id: &str,
+        folder_id: &str,
+        name: &str,
+        bytes: &[u8],
+    ) -> Result<String, FrameioError> {
+        let (file_id, media_type, chunks) =
+            self.create_local_upload(account_id, folder_id, name, bytes.len() as i64).await?;
+        if chunks.is_empty() {
+            return Err(FrameioError::Other(format!("Frame.io returned no upload URLs for {name}")));
+        }
+        let mut offset = 0usize;
+        for (size, url) in chunks {
+            let size = size.max(0) as usize;
+            let start = offset.min(bytes.len());
+            let end = (offset + size).min(bytes.len());
+            let mut request = self.http.put(url.as_str()).body(bytes[start..end].to_vec());
+            request = request.header("x-amz-acl", "private");
+            if let Some(media_type) = &media_type {
+                request = request.header("Content-Type", media_type.as_str());
+            }
+            let response = request
+                .send()
+                .await
+                .map_err(|e| FrameioError::Other(format!("upload PUT failed: {e}")))?;
+            if !response.status().is_success() {
+                return Err(FrameioError::Other(format!(
+                    "upload PUT for {name} returned {}",
+                    response.status()
+                )));
+            }
+            offset = end;
+        }
+        if offset < bytes.len() {
+            return Err(FrameioError::Other(format!(
+                "Frame.io returned upload URLs for only {offset} of {} bytes of {name}",
+                bytes.len()
+            )));
+        }
+        for _ in 0..40 {
+            let (complete, failed) = self.get_upload_status(account_id, &file_id).await?;
+            if failed {
+                return Err(FrameioError::Other(format!("Frame.io rejected the upload of {name}")));
+            }
+            if complete {
+                return Ok(file_id);
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        Err(FrameioError::Other(format!("Frame.io did not finish the upload of {name}")))
+    }
+
     /// Resolve-or-create a nested subfolder path under `root_folder_id`; returns the leaf id.
     pub async fn ensure_folder_path(&self, account_id: &str, root_folder_id: &str, parts: &[String]) -> Result<String, FrameioError> {
         let mut current = root_folder_id.to_string();

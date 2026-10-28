@@ -94,6 +94,7 @@
   let customExt = $state<string[]>([]);
   let maxSizeGb = $state("");
   let template = $state("");
+  let turbosort = $state("");
   let maxDownloads = $state("");
   let preview = $state(true);
   let preset = $state("");
@@ -148,6 +149,7 @@
         }
         maxSizeGb = link.max_file_size ? String(+(link.max_file_size / 1e9).toFixed(2)) : "";
         template = link.subfolder_template ?? "";
+        turbosort = link.turbosort ?? "";
       } else {
         const s = link.source;
         source = { source: s as DownloadSource, label: (s.label as string) ?? sourceSummary(s), path: (s.path as FolderRef["path"]) ?? [], count: null, bytes: (s.bytes as number) ?? null };
@@ -390,6 +392,7 @@
       b.allowed_extensions = allowedExtensions;
       b.max_file_size = maxSizeGb ? Math.round(parseFloat(maxSizeGb) * 1e9) : null;
       b.subfolder_template = template.trim() || null;
+      if (!editing || turbosort.trim() !== (up?.turbosort ?? "")) b.turbosort = turbosort.trim() || null;
     } else {
       if (!editing || JSON.stringify(source?.source) !== JSON.stringify(down?.source)) b.source = source?.source;
       b.viewer_fields_required = { name: askName, email: askEmail || otp };
@@ -793,6 +796,13 @@
                 <div class="rounded-md border border-border bg-surface-2/60 px-2.5 py-1.5 font-mono text-[11.5px] break-all text-muted">
                   {tplExample.join(" / ")} / <span class="text-text">A001_C003_1019XY.mov</span>
                 </div>
+              </div>
+            </div>
+            <div class={line}>
+              <div class={label}><label for="lc-zeus">Project Zeus</label></div>
+              <div class="grid gap-1.5">
+                <input id="lc-zeus" class={input} bind:value={turbosort} placeholder="Live_Work folder (leave empty for none)" autocomplete="off" />
+                <p class="text-xs text-faint">Writes a <span class="font-mono">.turbosort</span> marker into this folder. Project Zeus copies it to <span class="font-mono">Live_Work/{turbosort.trim() || "…"}/1_DRIVE</span>.</p>
               </div>
             </div>
           {:else}
