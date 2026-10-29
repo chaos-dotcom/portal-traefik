@@ -1,5 +1,10 @@
 # Portal API
 
+Machine-readable spec: **`GET /api/openapi.yaml`** (OpenAPI 3.0). Import it into Swagger Editor,
+Postman, Insomnia, or any OpenAPI tool. The same file is at `apps/api-rs/openapi.yaml` in the repo.
+
+An MCP server that wraps this API is in [`../mcp/`](../mcp/README.md).
+
 Portal's admin API is the same JSON API the web app uses, under `/api`. Two ways to authenticate:
 
 - **Session cookie** — log in with `POST /api/auth/login`, keep the `portal_session` cookie.
