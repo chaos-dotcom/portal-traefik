@@ -1,24 +1,28 @@
-# Portal MCP server
+# Portal MCP server (Rust)
 
-A small [MCP](https://modelcontextprotocol.io) server that exposes Portal's admin API as tools:
-upload links (including the Project Zeus `.turbosort` field), sync rules, and Frame.io browsing.
+A Rust stdio MCP server over Portal's admin HTTP API, built with
+[`rmcp`](https://crates.io/crates/rmcp). No Python or Node is needed to run it.
 
-It is a client of the HTTP API, not part of the Portal container. It authenticates with
-`PORTAL_API_TOKEN` (the bearer token described in [../docs/API.md](../docs/API.md)).
+It exposes upload links (including the Project Zeus `.turbosort` field), sync rules, and Frame.io
+browsing as MCP tools. It authenticates with `PORTAL_API_TOKEN` (the bearer token described in
+[../docs/API.md](../docs/API.md)).
+
+## Build
+
+```bash
+cd mcp
+cargo build --release
+```
 
 ## Run
 
 ```bash
-python3 -m venv .venv
-. .venv/bin/activate
-pip install -r requirements.txt
-
 PORTAL_URL=https://portal.example.com \
 PORTAL_API_TOKEN='<the token from Portal .env>' \
-python portal_mcp.py
+./target/release/portal-mcp
 ```
 
-The server speaks MCP over stdio by default.
+The server speaks MCP over stdio.
 
 ## MCP client configuration
 
@@ -26,8 +30,7 @@ The server speaks MCP over stdio by default.
 {
   "mcpServers": {
     "portal": {
-      "command": "/path/to/.venv/bin/python",
-      "args": ["/path/to/portal/mcp/portal_mcp.py"],
+      "command": "/path/to/portal/mcp/target/release/portal-mcp",
       "env": {
         "PORTAL_URL": "https://portal.example.com",
         "PORTAL_API_TOKEN": "<token>"
