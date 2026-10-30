@@ -104,7 +104,7 @@
   let driveFolder = $state<FolderRef | null>(null);
   // The outbound lane. A new link has one (the owner's ask: exports unless he says otherwise), and
   // it points at the link's own folder until a child of the project is chosen. An existing link
-  // follows what it stores: `exports` present means the box is ticked.
+  // follows what it stores: `exports` present means the switch is on.
   let exportsOn = $state(true);
   let exportsFolder = $state<FolderRef | null>(null);
   // The two sync sides choose from the first level of the project only: the link's folder names
@@ -182,7 +182,7 @@
         const account = link.folder?.account_id ?? "";
         driveFolder = s?.drive?.folder_id ? { account_id: account, folder_id: s.drive.folder_id } : null;
         exportsFolder = s?.exports?.folder_id ? { account_id: account, folder_id: s.exports.folder_id } : null;
-        // An existing link is shown as it was saved: no `exports` keeps the box unticked, so editing
+        // An existing link is shown as it was saved: no `exports` keeps the switch off, so editing
         // it never adds an upload lane the link deliberately did not have.
         exportsOn = !!s?.exports;
       } else {
@@ -1057,7 +1057,7 @@
                   </p>
                 {/if}
                 <div class={line}>
-                  <div class={label}><label for="lc-sync-drive">Client drive</label></div>
+                  <div class={label}><label for="lc-sync-drive">Imports</label></div>
                   <div class="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-2">
                     <div class="grid gap-2 sm:grid-cols-2">
                       <select id="lc-sync-drive" class="{input} max-w-none" value={driveFolder?.folder_id ?? ""} disabled={loadingFolders} onchange={(e) => pickSide("drive", e.currentTarget.value)}>
@@ -1107,10 +1107,13 @@
                 <div class={line}>
                   <div class={label}>Exports</div>
                   <div class="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-2">
-                    <label class="flex items-center gap-2 text-[13px] font-medium text-text">
-                      <input id="lc-sync-exports-on" type="checkbox" bind:checked={exportsOn} />
-                      Upload exports
-                    </label>
+                    <div class="flex min-w-0 items-center gap-3">
+                      <div class="min-w-0 flex-1">
+                        <b class="block font-medium text-text">Upload exports</b>
+                        <small class="block text-xs text-faint">Your exports go up to Frame.io</small>
+                      </div>
+                      <Switch id="lc-sync-exports-on" bind:checked={exportsOn} label="Upload exports" />
+                    </div>
                     {#if exportsOn}
                       <div class="grid gap-2 sm:grid-cols-2">
                         <select id="lc-sync-exports" class="{input} max-w-none" value={exportsFolder?.folder_id ?? ""} disabled={loadingFolders} onchange={(e) => pickSide("exports", e.currentTarget.value)}>
@@ -1156,7 +1159,7 @@
                         {/if}
                       </div>
                     {:else}
-                      <p class="text-xs text-faint">Nothing is uploaded. Tick <span class="font-medium text-muted">Upload exports</span> to send <span class="font-mono">{exportsLocal.trim() || "0_EXPORTS"}</span> up to Frame.io</p>
+                      <p class="text-xs text-faint">Nothing is uploaded. Turn on <span class="font-medium text-muted">Upload exports</span> to send <span class="font-mono">{exportsLocal.trim() || "0_EXPORTS"}</span> up to Frame.io</p>
                     {/if}
                   </div>
                 </div>
