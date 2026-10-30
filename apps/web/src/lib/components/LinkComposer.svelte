@@ -102,6 +102,10 @@
   let driveLocal = $state("1_DRIVE");
   let exportsLocal = $state("0_EXPORTS");
   let driveFolder = $state<FolderRef | null>(null);
+  // The outbound lane. A new link has one (the owner's ask: exports unless he says otherwise), and
+  // it points at the link's own folder until a child of the project is chosen. An existing link
+  // follows what it stores: `exports` present means the box is ticked.
+  let exportsOn = $state(true);
   let exportsFolder = $state<FolderRef | null>(null);
   // The two sync sides choose from the first level of the project only: the link's folder names
   // the account, and the project's root folder is the parent they list (and create into).
@@ -178,6 +182,9 @@
         const account = link.folder?.account_id ?? "";
         driveFolder = s?.drive?.folder_id ? { account_id: account, folder_id: s.drive.folder_id } : null;
         exportsFolder = s?.exports?.folder_id ? { account_id: account, folder_id: s.exports.folder_id } : null;
+        // An existing link is shown as it was saved: no `exports` keeps the box unticked, so editing
+        // it never adds an upload lane the link deliberately did not have.
+        exportsOn = !!s?.exports;
       } else {
         const s = link.source;
         source = { source: s as DownloadSource, label: (s.label as string) ?? sourceSummary(s), path: (s.path as FolderRef["path"]) ?? [], count: null, bytes: (s.bytes as number) ?? null };
@@ -340,7 +347,7 @@
     return list;
   }
 
-  /** Choose a folder id for one side ("" = the link's own folder, or no uploads on exports). */
+  /** Choose a folder id for one side ("" = the link's own folder, on both sides). */
   function selectSide(side: "drive" | "exports", id: string) {
     const f = folder;
     if (!f) return;
@@ -419,7 +426,8 @@
 
   /**
    * The defaults stay `1_DRIVE` and `0_EXPORTS`: on a link with no id for a side, a child already
-   * named so is preselected. A row the user has touched is left alone.
+   * named so is preselected. A row the user has touched is left alone. Exports that are off, or
+   * have no such child, stay on the link's own folder.
    */
   function preselectByName() {
     if (!children?.length) return;
@@ -427,7 +435,7 @@
       const c = children.find((x) => x.name === (driveLocal.trim() || "1_DRIVE"));
       if (c) selectSide("drive", c.id);
     }
-    if (!exportsFolder && !touched.exports) {
+    if (exportsOn && !exportsFolder && !touched.exports) {
       const c = children.find((x) => x.name === (exportsLocal.trim() || "0_EXPORTS"));
       if (c) selectSide("exports", c.id);
     }
@@ -569,9 +577,12 @@
     if (!syncOn) return null;
     return {
       mode: "add_only",
-      // No folder picked means the link's own folder.
+      // No folder picked means the link's own folder, on either side.
       drive: { local: driveLocal.trim() || "1_DRIVE", ...(driveFolder ? { folder_id: driveFolder.folder_id } : {}) },
-      ...(exportsFolder ? { exports: { local: exportsLocal.trim() || "0_EXPORTS", folder_id: exportsFolder.folder_id } } : {}),
+      // An unticked box is no outbound lane at all: the key is absent, which the API stores as none.
+      ...(exportsOn
+        ? { exports: { local: exportsLocal.trim() || "0_EXPORTS", ...(exportsFolder ? { folder_id: exportsFolder.folder_id } : {}) } }
+        : {}),
     };
   }
 
@@ -627,7 +638,7 @@
       error = "Enter a password, or turn the password off.";
       return;
     }
-    if (kind === "upload" && syncOn && exportsFolder && (exportsLocal.trim() || "0_EXPORTS") === (driveLocal.trim() || "1_DRIVE")) {
+    if (kind === "upload" && syncOn && exportsOn && (exportsLocal.trim() || "0_EXPORTS") === (driveLocal.trim() || "1_DRIVE")) {
       error = "The client drive and exports need different local folders.";
       return;
     }
@@ -1094,51 +1105,59 @@
                   </div>
                 </div>
                 <div class={line}>
-                  <div class={label}><label for="lc-sync-exports">Exports</label></div>
+                  <div class={label}>Exports</div>
                   <div class="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-2">
-                    <div class="grid gap-2 sm:grid-cols-2">
-                      <select id="lc-sync-exports" class="{input} max-w-none" value={exportsFolder?.folder_id ?? ""} disabled={loadingFolders} onchange={(e) => pickSide("exports", e.currentTarget.value)}>
-                        {#if loadingFolders && !children}
-                          <option value="">Loading the project's folders…</option>
-                        {:else}
-                          <option value="">None — no uploads</option>
-                          {#each sideOptions("exports") as c (c.id)}<option value={c.id}>{c.name}</option>{/each}
-                        {/if}
-                      </select>
-                      <input class={input} bind:value={exportsLocal} placeholder="0_EXPORTS" aria-label="Local folder for exports" autocomplete="off" spellcheck="false" />
-                    </div>
-                    <div class="flex min-w-0 flex-wrap items-center gap-1.5">
-                      <input
-                        class="{input} max-w-56"
-                        bind:value={newName.exports}
-                        placeholder="or type a new folder name"
-                        aria-label="New folder name for exports"
-                        autocomplete="off"
-                        spellcheck="false"
-                        onkeydown={(e) => {
-                          if (e.key === "Enter") {
-                            e.preventDefault();
-                            void createSideFolder("exports");
-                          }
-                        }}
-                      />
-                      <button type="button" class="h-8 rounded-md border border-border px-3 font-medium text-text hover:bg-surface-3 disabled:cursor-default disabled:opacity-40" disabled={!cleanFolderName(newName.exports) || !!creating} onclick={() => createSideFolder("exports")}>
-                        {creating === "exports" ? "Creating…" : "Create"}
-                      </button>
-                    </div>
-                    {#if newName.exports.trim() && !cleanFolderName(newName.exports)}
-                      <div class="text-xs text-danger">{FOLDER_NAME_RULE}</div>
-                    {/if}
-                    {#if createIssue?.side === "exports"}
-                      <div class="text-xs text-danger">{createIssue.message}</div>
-                    {/if}
-                    <div class="text-xs text-faint">
-                      {#if exportsFolder}
-                        Uploaded from <span class="font-mono">{exportsLocal.trim() || "0_EXPORTS"}</span> into <span class="font-mono">{syncRoot?.name ?? "the project"} / {exportsFolder.folder_name || "that folder"}</span>
-                      {:else}
-                        Nothing is uploaded. Pick a folder, or type a new name, to send <span class="font-mono">{exportsLocal.trim() || "0_EXPORTS"}</span> up to Frame.io
+                    <label class="flex items-center gap-2 text-[13px] font-medium text-text">
+                      <input id="lc-sync-exports-on" type="checkbox" bind:checked={exportsOn} />
+                      Upload exports
+                    </label>
+                    {#if exportsOn}
+                      <div class="grid gap-2 sm:grid-cols-2">
+                        <select id="lc-sync-exports" class="{input} max-w-none" value={exportsFolder?.folder_id ?? ""} disabled={loadingFolders} onchange={(e) => pickSide("exports", e.currentTarget.value)}>
+                          {#if loadingFolders && !children}
+                            <option value="">Loading the project's folders…</option>
+                          {:else}
+                            <option value="">This link's folder</option>
+                            {#each sideOptions("exports") as c (c.id)}<option value={c.id}>{c.name}</option>{/each}
+                          {/if}
+                        </select>
+                        <input class={input} bind:value={exportsLocal} placeholder="0_EXPORTS" aria-label="Local folder for exports" autocomplete="off" spellcheck="false" />
+                      </div>
+                      <div class="flex min-w-0 flex-wrap items-center gap-1.5">
+                        <input
+                          class="{input} max-w-56"
+                          bind:value={newName.exports}
+                          placeholder="or type a new folder name"
+                          aria-label="New folder name for exports"
+                          autocomplete="off"
+                          spellcheck="false"
+                          onkeydown={(e) => {
+                            if (e.key === "Enter") {
+                              e.preventDefault();
+                              void createSideFolder("exports");
+                            }
+                          }}
+                        />
+                        <button type="button" class="h-8 rounded-md border border-border px-3 font-medium text-text hover:bg-surface-3 disabled:cursor-default disabled:opacity-40" disabled={!cleanFolderName(newName.exports) || !!creating} onclick={() => createSideFolder("exports")}>
+                          {creating === "exports" ? "Creating…" : "Create"}
+                        </button>
+                      </div>
+                      {#if newName.exports.trim() && !cleanFolderName(newName.exports)}
+                        <div class="text-xs text-danger">{FOLDER_NAME_RULE}</div>
                       {/if}
-                    </div>
+                      {#if createIssue?.side === "exports"}
+                        <div class="text-xs text-danger">{createIssue.message}</div>
+                      {/if}
+                      <div class="text-xs text-faint">
+                        {#if exportsFolder}
+                          Uploaded from <span class="font-mono">{exportsLocal.trim() || "0_EXPORTS"}</span> into <span class="font-mono">{syncRoot?.name ?? "the project"} / {exportsFolder.folder_name || "that folder"}</span>
+                        {:else}
+                          Uploaded from <span class="font-mono">{exportsLocal.trim() || "0_EXPORTS"}</span> into this link's folder
+                        {/if}
+                      </div>
+                    {:else}
+                      <p class="text-xs text-faint">Nothing is uploaded. Tick <span class="font-medium text-muted">Upload exports</span> to send <span class="font-mono">{exportsLocal.trim() || "0_EXPORTS"}</span> up to Frame.io</p>
+                    {/if}
                   </div>
                 </div>
               {/if}
