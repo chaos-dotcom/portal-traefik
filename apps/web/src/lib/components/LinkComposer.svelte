@@ -32,7 +32,7 @@
   import Icon from "./Icon.svelte";
   import Switch from "./Switch.svelte";
   import ConfirmButton from "./ConfirmButton.svelte";
-  import { coveringRules, crumbNames, nasPathFor, type DownloadSource, type FolderRef, type RuleLike } from "$lib/frameio";
+  import { coveringRules, createFolder, crumbNames, listFolders, nasPathFor, resolvePath, type DownloadSource, type FolderRef, type Named, type RuleLike } from "$lib/frameio";
   import { expiresText, kindNoun, sourceSummary, type DownloadLink, type LiveWorkSync, type UploadLink } from "$lib/links";
   import { copyWithToast, errorDetail, toast } from "$lib/toast.svelte";
   import { formatBytes, accentText } from "$lib/format";
@@ -100,6 +100,15 @@
   let exportsLocal = $state("0_EXPORTS");
   let driveFolder = $state<FolderRef | null>(null);
   let exportsFolder = $state<FolderRef | null>(null);
+  // The two sync sides choose from the first level of the project only: the link's folder names
+  // the account, and the project's root folder is the parent they list (and create into).
+  let syncRoot = $state<{ account_id: string; folder_id: string; name: string } | null>(null);
+  let children = $state<Named[] | null>(null);
+  let loadingFolders = $state(false);
+  let syncError = $state<string | null>(null);
+  let newName = $state<{ drive: string; exports: string }>({ drive: "", exports: "" });
+  let creating = $state<"drive" | "exports" | null>(null);
+  let createIssue = $state<{ side: "drive" | "exports"; message: string } | null>(null);
   let maxDownloads = $state("");
   let preview = $state(true);
   let preset = $state("");
@@ -296,6 +305,158 @@
   function passphrase(): string {
     const pick = () => WORDS[Math.floor(Math.random() * WORDS.length)];
     return `${pick()}-${pick()}-${10 + Math.floor(Math.random() * 90)}`;
+  }
+
+  // ── the project's first level (sync) ────────────────────────────────────
+  // A sync side is one folder of the project, so both rows list the folders directly inside the
+  // project root. A name that is not there yet can be typed and Portal creates it.
+  const FOLDER_NAME_RULE = "A folder name can't be empty, contain / \\ % or be . or ..";
+
+  const folderKey = $derived(kind === "upload" && syncOn && folder ? `${folder.account_id}:${folder.folder_id}` : "");
+  let folderSeq = 0;
+
+  $effect(() => {
+    const key = folderKey;
+    untrack(() => void loadProjectFolders(key));
+  });
+
+  const byName = (a: Named, b: Named) => a.name.localeCompare(b.name);
+
+  const sideRef = (side: "drive" | "exports") => (side === "drive" ? driveFolder : exportsFolder);
+
+  /** What a side offers: the project's children, plus a saved folder that is no longer in the list. */
+  function sideOptions(side: "drive" | "exports"): Named[] {
+    const list = children ?? [];
+    const chosen = sideRef(side);
+    if (chosen && !list.some((c) => c.id === chosen.folder_id)) {
+      return [...list, { id: chosen.folder_id, name: chosen.folder_name || "the saved folder" }];
+    }
+    return list;
+  }
+
+  /** Choose a folder id for one side ("" = the link's own folder, or no uploads on exports). */
+  function selectSide(side: "drive" | "exports", id: string) {
+    const f = folder;
+    if (!f) return;
+    if (!id) {
+      if (side === "drive") driveFolder = null;
+      else exportsFolder = null;
+      return;
+    }
+    const name = sideOptions(side).find((c) => c.id === id)?.name ?? "";
+    const ref: FolderRef = { account_id: f.account_id, folder_id: id, folder_name: name || null };
+    if (side === "drive") {
+      driveFolder = ref;
+      if (name) driveLocal = name;
+    } else {
+      exportsFolder = ref;
+      if (name) exportsLocal = name;
+    }
+  }
+
+  /** The sync validator's rule for a local folder name, applied before we ask Frame.io for one. */
+  function cleanFolderName(raw: string): string | null {
+    const v = raw.trim();
+    if (!v || v === "." || v === ".." || /[/\\%]/.test(v) || /[\u0000-\u001f]/.test(v)) return null;
+    return v;
+  }
+
+  async function loadProjectFolders(key: string) {
+    const f = folder;
+    if (!key || !f) {
+      syncRoot = null;
+      children = null;
+      syncError = null;
+      loadingFolders = false;
+      return;
+    }
+    const my = ++folderSeq;
+    loadingFolders = true;
+    syncError = null;
+    try {
+      // The first level hangs off the project root. The picked folder usually carries its
+      // breadcrumb; without one, ask Frame.io where the folder lives.
+      let root = f.path?.length ? f.path[0].id : "";
+      if (!root) root = (await resolvePath(f.account_id, f.folder_id)).root_folder_id ?? "";
+      if (my !== folderSeq) return;
+      if (!root) root = f.folder_id;
+      const moved = !!syncRoot && syncRoot.folder_id !== root;
+      if (moved || syncRoot?.folder_id !== root) {
+        syncRoot = { account_id: f.account_id, folder_id: root, name: crumbNames(f)[0] ?? f.project_name ?? "this project" };
+      }
+      if (moved) {
+        // Another project: the two chosen folders belong to the one we just left.
+        driveFolder = null;
+        exportsFolder = null;
+        newName = { drive: "", exports: "" };
+        createIssue = null;
+      }
+      const kids = await listFolders(f.account_id, root);
+      if (my !== folderSeq) return;
+      children = [...kids].sort(byName);
+      preselectByName();
+    } catch (e) {
+      if (my !== folderSeq) return;
+      children = [];
+      syncError = e instanceof Error ? e.message : "Could not read the project's folders from Frame.io";
+    } finally {
+      if (my === folderSeq) loadingFolders = false;
+    }
+  }
+
+  /** The defaults stay `1_DRIVE` and `0_EXPORTS`: a child already named so is preselected. */
+  function preselectByName() {
+    if (!children?.length) return;
+    if (!driveFolder) {
+      const c = children.find((x) => x.name === (driveLocal.trim() || "1_DRIVE"));
+      if (c) selectSide("drive", c.id);
+    }
+    if (!exportsFolder) {
+      const c = children.find((x) => x.name === (exportsLocal.trim() || "0_EXPORTS"));
+      if (c) selectSide("exports", c.id);
+    }
+  }
+
+  /** Make the typed folder under the project root, then use it. A sibling of that name wins. */
+  async function createSideFolder(side: "drive" | "exports") {
+    const name = cleanFolderName(newName[side]);
+    const root = syncRoot;
+    if (!name) {
+      createIssue = { side, message: FOLDER_NAME_RULE };
+      return;
+    }
+    if (!root || creating) return;
+    createIssue = null;
+    const twin = children?.find((c) => c.name === name);
+    if (twin) {
+      // Same name, same parent: that is the folder meant, so select it instead of a duplicate.
+      selectSide(side, twin.id);
+      newName[side] = "";
+      return;
+    }
+    creating = side;
+    try {
+      const made = await createFolder(root.account_id, root.folder_id, name);
+      children = [...(children ?? []), made].sort(byName);
+      selectSide(side, made.id);
+      newName[side] = "";
+      // Read the level back, so the list is Frame.io's answer and not our guess.
+      void refreshFolders();
+    } catch (e) {
+      createIssue = { side, message: e instanceof Error ? e.message : "Could not create the folder" };
+    } finally {
+      creating = null;
+    }
+  }
+
+  async function refreshFolders() {
+    const root = syncRoot;
+    if (!root) return;
+    try {
+      children = [...(await listFolders(root.account_id, root.folder_id))].sort(byName);
+    } catch {
+      // Keep what we have: the folder exists, this list is only the mirror.
+    }
   }
 
   // ── presets ─────────────────────────────────────────────────────────────
@@ -851,45 +1012,119 @@
                   <Switch bind:checked={syncOn} label="Sync this project's folders with FioTransfer" />
                 </div>
                 {#if syncOn}
-                  <p class="text-xs text-faint">Files are added in both directions. Nothing is ever deleted: you can clear Frame.io once you have your own copy.</p>
+                  <p class="text-xs text-faint">Files are added in both directions. Nothing is ever deleted: you can clear Frame.io once you have your own copy. Both rows list the folders directly inside {syncRoot ? `“${syncRoot.name}”` : "the project"}: pick one, or type a new name and Portal makes it.</p>
                 {/if}
               </div>
             </div>
             {#if syncOn}
-              <div class={line}>
-                <div class={label}><label for="lc-sync-drive">Client drive</label></div>
-                <div class="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-2">
-                  <div class="grid gap-2 sm:grid-cols-2">
-                    <input id="lc-sync-drive" class={input} bind:value={driveLocal} placeholder="1_DRIVE" aria-label="Local folder for the client drive" autocomplete="off" spellcheck="false" />
-                    <FolderField bind:value={driveFolder} {recents} title="Download the client drive from" placeholder="This link's folder" chooseVerb="Use" />
-                  </div>
-                  <div class="text-xs text-faint">
-                    {#if driveFolder}
-                      Downloaded from <span class="font-mono">{crumbNames(driveFolder).at(-1) ?? "that folder"}</span> into <span class="font-mono">{driveLocal.trim() || "1_DRIVE"}</span>
-                      <button type="button" class="font-medium text-muted hover:text-text" onclick={() => (driveFolder = null)}>Use this link's folder</button>
-                    {:else}
-                      Downloaded from this link's folder into <span class="font-mono">{driveLocal.trim() || "1_DRIVE"}</span>
+              {#if !folder}
+                <div class={line}>
+                  <div class={label}>Folders</div>
+                  <p class="text-xs text-faint">Choose the folder uploads land in first: both sync rows list that project's own folders.</p>
+                </div>
+              {:else}
+                {#if syncError}
+                  <p class="my-1 rounded-md bg-danger/10 px-3 py-2 text-danger">
+                    {syncError}{#if /not connected/i.test(syncError)}. <a href="/settings" class="font-medium underline">Connect Frame.io in Settings</a>{/if}
+                  </p>
+                {/if}
+                <div class={line}>
+                  <div class={label}><label for="lc-sync-drive">Client drive</label></div>
+                  <div class="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-2">
+                    <div class="grid gap-2 sm:grid-cols-2">
+                      <select id="lc-sync-drive" class="{input} max-w-none" value={driveFolder?.folder_id ?? ""} disabled={loadingFolders} onchange={(e) => selectSide("drive", e.currentTarget.value)}>
+                        {#if loadingFolders && !children}
+                          <option value="">Loading the project's folders…</option>
+                        {:else}
+                          <option value="">This link's folder</option>
+                          {#each sideOptions("drive") as c (c.id)}<option value={c.id}>{c.name}</option>{/each}
+                        {/if}
+                      </select>
+                      <input class={input} bind:value={driveLocal} placeholder="1_DRIVE" aria-label="Local folder for the client drive" autocomplete="off" spellcheck="false" />
+                    </div>
+                    <div class="flex min-w-0 flex-wrap items-center gap-1.5">
+                      <input
+                        class="{input} max-w-56"
+                        bind:value={newName.drive}
+                        placeholder="or type a new folder name"
+                        aria-label="New folder name for the client drive"
+                        autocomplete="off"
+                        spellcheck="false"
+                        onkeydown={(e) => {
+                          if (e.key === "Enter") {
+                            e.preventDefault();
+                            void createSideFolder("drive");
+                          }
+                        }}
+                      />
+                      <button type="button" class="h-8 rounded-md border border-border px-3 font-medium text-text hover:bg-surface-3 disabled:cursor-default disabled:opacity-40" disabled={!cleanFolderName(newName.drive) || !!creating} onclick={() => createSideFolder("drive")}>
+                        {creating === "drive" ? "Creating…" : "Create"}
+                      </button>
+                    </div>
+                    {#if newName.drive.trim() && !cleanFolderName(newName.drive)}
+                      <div class="text-xs text-danger">{FOLDER_NAME_RULE}</div>
                     {/if}
+                    {#if createIssue?.side === "drive"}
+                      <div class="text-xs text-danger">{createIssue.message}</div>
+                    {/if}
+                    <div class="text-xs text-faint">
+                      {#if driveFolder}
+                        Downloaded from <span class="font-mono">{syncRoot?.name ?? "the project"} / {driveFolder.folder_name || "that folder"}</span> into <span class="font-mono">{driveLocal.trim() || "1_DRIVE"}</span>
+                      {:else}
+                        Downloaded from this link's folder into <span class="font-mono">{driveLocal.trim() || "1_DRIVE"}</span>
+                      {/if}
+                    </div>
                   </div>
                 </div>
-              </div>
-              <div class={line}>
-                <div class={label}><label for="lc-sync-exports">Exports</label></div>
-                <div class="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-2">
-                  <div class="grid gap-2 sm:grid-cols-2">
-                    <input id="lc-sync-exports" class={input} bind:value={exportsLocal} placeholder="0_EXPORTS" aria-label="Local folder for exports" autocomplete="off" spellcheck="false" />
-                    <FolderField bind:value={exportsFolder} {recents} title="Upload exports into" placeholder="None — no uploads" chooseVerb="Use" />
-                  </div>
-                  <div class="text-xs text-faint">
-                    {#if exportsFolder}
-                      Uploaded from <span class="font-mono">{exportsLocal.trim() || "0_EXPORTS"}</span> into <span class="font-mono">{crumbNames(exportsFolder).at(-1) ?? "that folder"}</span>
-                      <button type="button" class="font-medium text-muted hover:text-text" onclick={() => (exportsFolder = null)}>No uploads</button>
-                    {:else}
-                      Nothing is uploaded. Pick a folder to send <span class="font-mono">{exportsLocal.trim() || "0_EXPORTS"}</span> up to Frame.io
+                <div class={line}>
+                  <div class={label}><label for="lc-sync-exports">Exports</label></div>
+                  <div class="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-2">
+                    <div class="grid gap-2 sm:grid-cols-2">
+                      <select id="lc-sync-exports" class="{input} max-w-none" value={exportsFolder?.folder_id ?? ""} disabled={loadingFolders} onchange={(e) => selectSide("exports", e.currentTarget.value)}>
+                        {#if loadingFolders && !children}
+                          <option value="">Loading the project's folders…</option>
+                        {:else}
+                          <option value="">None — no uploads</option>
+                          {#each sideOptions("exports") as c (c.id)}<option value={c.id}>{c.name}</option>{/each}
+                        {/if}
+                      </select>
+                      <input class={input} bind:value={exportsLocal} placeholder="0_EXPORTS" aria-label="Local folder for exports" autocomplete="off" spellcheck="false" />
+                    </div>
+                    <div class="flex min-w-0 flex-wrap items-center gap-1.5">
+                      <input
+                        class="{input} max-w-56"
+                        bind:value={newName.exports}
+                        placeholder="or type a new folder name"
+                        aria-label="New folder name for exports"
+                        autocomplete="off"
+                        spellcheck="false"
+                        onkeydown={(e) => {
+                          if (e.key === "Enter") {
+                            e.preventDefault();
+                            void createSideFolder("exports");
+                          }
+                        }}
+                      />
+                      <button type="button" class="h-8 rounded-md border border-border px-3 font-medium text-text hover:bg-surface-3 disabled:cursor-default disabled:opacity-40" disabled={!cleanFolderName(newName.exports) || !!creating} onclick={() => createSideFolder("exports")}>
+                        {creating === "exports" ? "Creating…" : "Create"}
+                      </button>
+                    </div>
+                    {#if newName.exports.trim() && !cleanFolderName(newName.exports)}
+                      <div class="text-xs text-danger">{FOLDER_NAME_RULE}</div>
                     {/if}
+                    {#if createIssue?.side === "exports"}
+                      <div class="text-xs text-danger">{createIssue.message}</div>
+                    {/if}
+                    <div class="text-xs text-faint">
+                      {#if exportsFolder}
+                        Uploaded from <span class="font-mono">{exportsLocal.trim() || "0_EXPORTS"}</span> into <span class="font-mono">{syncRoot?.name ?? "the project"} / {exportsFolder.folder_name || "that folder"}</span>
+                      {:else}
+                        Nothing is uploaded. Pick a folder, or type a new name, to send <span class="font-mono">{exportsLocal.trim() || "0_EXPORTS"}</span> up to Frame.io
+                      {/if}
+                    </div>
                   </div>
                 </div>
-              </div>
+              {/if}
             {/if}
           {:else}
             <div class="{line} border-t-0 pt-1">
