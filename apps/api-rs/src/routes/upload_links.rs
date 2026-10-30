@@ -93,6 +93,78 @@ fn turbosort_of(folder: &Value) -> Option<String> {
     folder.get("turbosort").and_then(|v| v.as_str()).map(|s| s.to_string())
 }
 
+/// `folder.sync` — per-link "sync to live work". FioTransfer downloads the client's drive into a
+/// local folder and uploads another local folder into Frame.io, adding files in both directions
+/// and never deleting any (`add_only`), so a person can clear Frame.io once they have their own
+/// copy without losing what is on the NAS.
+///
+/// The only mode there is; an unknown one is rejected rather than guessed at.
+const SYNC_MODES: [&str; 1] = ["add_only"];
+
+/// One local folder name: a single path segment, no separators, no `%`, no control characters and
+/// not `.`/`..` — it names one folder inside the project on the NAS.
+fn clean_sync_folder(side: &str, value: &str) -> Result<String, String> {
+    let v = value.trim();
+    if v.is_empty() {
+        return Err(format!("sync.{side}.local must not be empty"));
+    }
+    if v == "." || v == ".." || v.contains('/') || v.contains('\\') || v.contains('%')
+        || v.chars().any(char::is_control) {
+        return Err(format!("sync.{side}.local must be a single folder name"));
+    }
+    Ok(v.to_string())
+}
+
+/// A Frame.io V4 id is a UUID; anything else is a typo we would rather not store.
+fn sync_folder_id(side: &str, value: &str) -> Result<String, String> {
+    let v = value.trim();
+    if Uuid::parse_str(v).is_err() {
+        return Err(format!("sync.{side}.folder_id must be a Frame.io folder id"));
+    }
+    Ok(v.to_string())
+}
+
+/// Validate `folder.sync` and return it as stored. `None` means the link has no sync: the key was
+/// absent or null. Absent `folder_id`s stay absent — the consumer reads them as "the link's own
+/// folder". `mode` is stored explicitly so the client never has to guess.
+pub fn validate_sync(raw: Option<&Value>) -> Result<Option<Value>, String> {
+    let Some(raw) = raw.filter(|v| !v.is_null()) else { return Ok(None) };
+    let Some(obj) = raw.as_object() else { return Err("sync must be an object".to_string()) };
+    let accepted = SYNC_MODES.map(|m| format!("'{m}'")).join(", ");
+    let mode = match obj.get("mode") {
+        None | Some(Value::Null) => SYNC_MODES[0].to_string(),
+        Some(Value::String(m)) if SYNC_MODES.contains(&m.as_str()) => m.clone(),
+        Some(_) => return Err(format!("sync.mode must be one of [{accepted}]")),
+    };
+    let side = |name: &str| -> Result<Option<Value>, String> {
+        let Some(v) = obj.get(name).filter(|v| !v.is_null()) else { return Ok(None) };
+        let Some(s) = v.as_object() else { return Err(format!("sync.{name} must be an object")) };
+        let Some(local) = s.get("local").and_then(|v| v.as_str()) else {
+            return Err(format!("sync.{name}.local is required"));
+        };
+        let mut out = Map::new();
+        out.insert("local".to_string(), json!(clean_sync_folder(name, local)?));
+        if let Some(id) = s.get("folder_id").and_then(|v| v.as_str()) {
+            out.insert("folder_id".to_string(), json!(sync_folder_id(name, id)?));
+        }
+        Ok(Some(Value::Object(out)))
+    };
+    // The client's drive is what the link is for: without it there is nothing to download.
+    let drive = side("drive")?.ok_or_else(|| "sync.drive is required".to_string())?;
+    let exports = side("exports")?;
+    if let Some(exp) = &exports
+        && exp.get("local") == drive.get("local") {
+            return Err("sync.drive.local and sync.exports.local must be different folders".to_string());
+        }
+    let mut out = Map::new();
+    out.insert("mode".to_string(), json!(mode));
+    out.insert("drive".to_string(), drive);
+    if let Some(exp) = exports {
+        out.insert("exports".to_string(), exp);
+    }
+    Ok(Some(Value::Object(out)))
+}
+
 /// The Frame.io destination a link writes to, with an optional legacy target-folder override.
 fn destination_for(folder: &Value, target_folder_id: Option<&str>) -> DestinationConfig {
     let mut data = folder.clone();
@@ -190,6 +262,9 @@ fn not_found() -> Response {
 /// Check a picked Frame.io folder and build the config stored on the link: ids, the folder's name
 /// from Frame.io, and the display breadcrumb (the picker's, else resolved best-effort).
 pub async fn validated_folder(state: &AppState, raw: &Value) -> Result<Value, Response> {
+    // `sync` is ours alone: check it here, before any Frame.io call, and carry it into the stored
+    // config. It rides along in `folder`, so it is returned verbatim by every read.
+    let sync = validate_sync(raw.get("sync")).map_err(|m| detail(StatusCode::UNPROCESSABLE_ENTITY, &m))?;
     let get = |k: &str| str_or_none(raw.get(k));
     let (Some(account_id), Some(folder_id)) = (get("account_id"), get("folder_id")) else {
         return Err(detail(StatusCode::UNPROCESSABLE_ENTITY, "folder needs account_id and folder_id"));
@@ -203,7 +278,7 @@ pub async fn validated_folder(state: &AppState, raw: &Value) -> Result<Value, Re
     };
     let project_id = get("project_id").or(folder.project_id.clone()).unwrap_or_default();
     let project_name = get("project_name");
-    let stored = json!({
+    let mut stored = json!({
         "type": "frameio",
         "account_id": account_id,
         "workspace_id": get("workspace_id"),
@@ -211,6 +286,10 @@ pub async fn validated_folder(state: &AppState, raw: &Value) -> Result<Value, Re
         "folder_id": folder_id,
         "folder_name": folder.name,
     });
+    if let Some(sync) = sync
+        && let Some(obj) = stored.as_object_mut() {
+            obj.insert("sync".to_string(), sync);
+        }
     if let Some(path) = clean_path(raw.get("path"), &folder_id) {
         return Ok(stamp_path(&stored, &path, project_name.as_deref()));
     }
@@ -334,10 +413,19 @@ pub async fn update_link(State(state): State<AppState>, _: Admin, Path(id): Path
     // `exclude_unset`: only keys present in the body are applied.
     let folder_changed = body.get("folder").filter(|v| v.is_object()).is_some();
     let mut new_folder = match body.get("folder").filter(|v| v.is_object()) {
-        Some(raw_folder) => match validated_folder(&state, raw_folder).await {
-            Ok(f) => f,
-            Err(r) => return r,
-        },
+        Some(raw_folder) => {
+            let mut f = match validated_folder(&state, raw_folder).await {
+                Ok(f) => f,
+                Err(r) => return r,
+            };
+            // A body that says nothing about `sync` leaves it as it was; only the key present as
+            // `null` (or a new object) changes it.
+            if raw_folder.get("sync").is_none()
+                && let (Some(old_sync), Some(obj)) = (old_folder.get("sync"), f.as_object_mut()) {
+                    obj.insert("sync".to_string(), old_sync.clone());
+                }
+            f
+        }
         None => old_folder.clone(),
     };
     let trigger_change: Option<Option<String>> = match body.get("turbosort") {
@@ -372,13 +460,14 @@ pub async fn update_link(State(state): State<AppState>, _: Admin, Path(id): Path
                 None => { obj.remove("turbosort"); }
             }
         }
-        if folder_changed {
+        if folder_changed && new_folder.get("folder_id") != old_folder.get("folder_id") {
             // The folder is now exactly where uploads land: drop any older base-subfolder override.
+            // A `folder` sent only to carry a new `sync` leaves the override alone.
             let _ = sqlx::query(
                 "UPDATE links SET folder = $1, target_folder_id = NULL, target_folder_name = NULL WHERE id = $2",
             )
             .bind(&new_folder).bind(id).execute(&state.db).await;
-        } else if trigger_change.is_some() {
+        } else if folder_changed || trigger_change.is_some() {
             let _ = sqlx::query("UPDATE links SET folder = $1 WHERE id = $2")
                 .bind(&new_folder).bind(id).execute(&state.db).await;
         }
@@ -583,5 +672,98 @@ mod tests {
         let v = json!([".MOV", "mov", " r3d ", ""]);
         assert_eq!(normalize_extensions(Some(&v)), Some(json!(["mov", "r3d"])));
         assert_eq!(normalize_extensions(Some(&json!([]))), None);
+    }
+
+    #[test]
+    fn sync_is_optional_and_null_clears_it() {
+        assert_eq!(validate_sync(None), Ok(None));
+        assert_eq!(validate_sync(Some(&Value::Null)), Ok(None));
+    }
+
+    #[test]
+    fn sync_stores_add_only_and_keeps_each_side_as_given() {
+        // Omitted folder ids stay omitted: the client reads them as "the link's own folder".
+        let raw = json!({ "drive": { "local": " 1_DRIVE " } });
+        assert_eq!(
+            validate_sync(Some(&raw)),
+            Ok(Some(json!({ "mode": "add_only", "drive": { "local": "1_DRIVE" } })))
+        );
+        let raw = json!({
+            "mode": "add_only",
+            "drive": { "local": "1_DRIVE", "folder_id": "8008cf70-f28e-474d-a209-d67afb9fddb6" },
+            "exports": { "local": "0_EXPORTS", "folder_id": "6f4121b3-628d-4b7a-91ea-8b1ac4a3f0a3" },
+        });
+        assert_eq!(
+            validate_sync(Some(&raw)),
+            Ok(Some(json!({
+                "mode": "add_only",
+                "drive": { "local": "1_DRIVE", "folder_id": "8008cf70-f28e-474d-a209-d67afb9fddb6" },
+                "exports": { "local": "0_EXPORTS", "folder_id": "6f4121b3-628d-4b7a-91ea-8b1ac4a3f0a3" },
+            })))
+        );
+    }
+
+    #[test]
+    fn sync_local_folder_is_one_path_segment() {
+        for bad in [".", "..", "1_DRIVE/out", "1_DRIVE\\out", "1_DRIVE%2Fout", "a\nb", "a\tb"] {
+            let raw = json!({ "drive": { "local": bad } });
+            assert_eq!(
+                validate_sync(Some(&raw)),
+                Err("sync.drive.local must be a single folder name".to_string()),
+                "{bad:?} must be rejected"
+            );
+        }
+        for empty in ["", "  "] {
+            let raw = json!({ "drive": { "local": empty } });
+            assert_eq!(
+                validate_sync(Some(&raw)),
+                Err("sync.drive.local must not be empty".to_string()),
+                "{empty:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn sync_folder_ids_must_be_frameio_ids() {
+        let raw = json!({ "drive": { "local": "1_DRIVE", "folder_id": "1_DRIVE" } });
+        assert_eq!(
+            validate_sync(Some(&raw)),
+            Err("sync.drive.folder_id must be a Frame.io folder id".to_string())
+        );
+        let raw = json!({ "drive": { "local": "1_DRIVE" }, "exports": { "local": "0_EXPORTS", "folder_id": "" } });
+        assert_eq!(
+            validate_sync(Some(&raw)),
+            Err("sync.exports.folder_id must be a Frame.io folder id".to_string())
+        );
+    }
+
+    #[test]
+    fn sync_shape_and_mode_errors_name_what_is_accepted() {
+        assert_eq!(validate_sync(Some(&json!("add_only"))), Err("sync must be an object".to_string()));
+        assert_eq!(validate_sync(Some(&json!({}))), Err("sync.drive is required".to_string()));
+        assert_eq!(
+            validate_sync(Some(&json!({ "drive": "1_DRIVE" }))),
+            Err("sync.drive must be an object".to_string())
+        );
+        assert_eq!(
+            validate_sync(Some(&json!({ "drive": {} }))),
+            Err("sync.drive.local is required".to_string())
+        );
+        assert_eq!(
+            validate_sync(Some(&json!({ "mode": "mirror", "drive": { "local": "1_DRIVE" } }))),
+            Err("sync.mode must be one of ['add_only']".to_string())
+        );
+    }
+
+    #[test]
+    fn sync_sides_must_name_different_local_folders() {
+        let raw = json!({
+            "drive": { "local": "1_DRIVE" },
+            "exports": { "local": " 1_DRIVE " },
+        });
+        assert_eq!(
+            validate_sync(Some(&raw)),
+            Err("sync.drive.local and sync.exports.local must be different folders".to_string())
+        );
     }
 }

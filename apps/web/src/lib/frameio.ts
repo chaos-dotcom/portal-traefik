@@ -2,6 +2,8 @@
 // the picker makes. A FolderRef is exactly what an upload link stores as its `folder` and what a
 // sync rule stores as its `source` (minus `recursive`).
 
+import type { LiveWorkSync } from "$lib/links";
+
 export type PathSegment = { id: string; name: string };
 
 export type FolderRef = {
@@ -14,6 +16,8 @@ export type FolderRef = {
   folder_name?: string | null;
   // Breadcrumb from the project root (named after the project) down to the folder.
   path?: PathSegment[] | null;
+  // Upload links only: which local folders FioTransfer syncs with this project.
+  sync?: LiveWorkSync | null;
 };
 
 // What a download link serves. Display-only extras (path, label, names) ride along in the stored

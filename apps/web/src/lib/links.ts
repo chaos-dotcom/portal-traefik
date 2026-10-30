@@ -7,6 +7,23 @@ import { formatBytes } from "$lib/format";
 
 export type LinkState = "ok" | "expired" | "revoked";
 
+/**
+ * Per-link "sync to live work", stored inside an upload link's `folder` JSON.
+ *
+ * `drive` is the client's drop folder: FioTransfer downloads it into the local folder named
+ * `local`. `exports` is ours: the local folder named `local` is uploaded into it, and leaving it
+ * out means no uploads. An omitted `folder_id` means "the link's own folder".
+ *
+ * `add_only` is the whole rule: files are added in both directions and nothing is ever deleted, so
+ * Frame.io can be cleared once the local copy exists.
+ */
+export type LiveWorkSyncFolder = { local: string; folder_id?: string | null };
+export type LiveWorkSync = {
+  mode?: "add_only";
+  drive: LiveWorkSyncFolder;
+  exports?: LiveWorkSyncFolder | null;
+};
+
 type LinkBase = {
   id: string;
   name: string;
@@ -27,6 +44,7 @@ type LinkBase = {
 
 export type UploadLink = LinkBase & {
   kind: "upload";
+  // Where uploads land; also carries the Project Zeus marker and the optional live-work `sync`.
   folder: FolderRef | null;
   max_file_size: number | null;
   allowed_extensions: string[] | null;

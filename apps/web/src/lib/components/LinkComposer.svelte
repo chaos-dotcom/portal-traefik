@@ -33,7 +33,7 @@
   import Switch from "./Switch.svelte";
   import ConfirmButton from "./ConfirmButton.svelte";
   import { coveringRules, crumbNames, nasPathFor, type DownloadSource, type FolderRef, type RuleLike } from "$lib/frameio";
-  import { expiresText, kindNoun, sourceSummary, type DownloadLink, type UploadLink } from "$lib/links";
+  import { expiresText, kindNoun, sourceSummary, type DownloadLink, type LiveWorkSync, type UploadLink } from "$lib/links";
   import { copyWithToast, errorDetail, toast } from "$lib/toast.svelte";
   import { formatBytes, accentText } from "$lib/format";
   import { UPLOAD_TOKENS } from "$lib/tokens";
@@ -95,6 +95,11 @@
   let maxSizeGb = $state("");
   let template = $state("");
   let turbosort = $state("");
+  let syncOn = $state(false);
+  let driveLocal = $state("1_DRIVE");
+  let exportsLocal = $state("0_EXPORTS");
+  let driveFolder = $state<FolderRef | null>(null);
+  let exportsFolder = $state<FolderRef | null>(null);
   let maxDownloads = $state("");
   let preview = $state(true);
   let preset = $state("");
@@ -150,6 +155,14 @@
         maxSizeGb = link.max_file_size ? String(+(link.max_file_size / 1e9).toFixed(2)) : "";
         template = link.subfolder_template ?? "";
         turbosort = link.turbosort ?? "";
+        const s = link.folder?.sync ?? null;
+        syncOn = !!s;
+        driveLocal = s?.drive?.local ?? "1_DRIVE";
+        exportsLocal = s?.exports?.local ?? "0_EXPORTS";
+        // Only the ids are stored; the breadcrumb is rebuilt once a folder is picked again.
+        const account = link.folder?.account_id ?? "";
+        driveFolder = s?.drive?.folder_id ? { account_id: account, folder_id: s.drive.folder_id } : null;
+        exportsFolder = s?.exports?.folder_id ? { account_id: account, folder_id: s.exports.folder_id } : null;
       } else {
         const s = link.source;
         source = { source: s as DownloadSource, label: (s.label as string) ?? sourceSummary(s), path: (s.path as FolderRef["path"]) ?? [], count: null, bytes: (s.bytes as number) ?? null };
@@ -373,6 +386,17 @@
   const kindPresets = $derived(savedPresets.filter((p) => p.kind === kind));
 
   // ── save ────────────────────────────────────────────────────────────────
+  /** `folder.sync` as the API stores it, or null when the switch is off. */
+  function syncPayload(): LiveWorkSync | null {
+    if (!syncOn) return null;
+    return {
+      mode: "add_only",
+      // No folder picked means the link's own folder.
+      drive: { local: driveLocal.trim() || "1_DRIVE", ...(driveFolder ? { folder_id: driveFolder.folder_id } : {}) },
+      ...(exportsFolder ? { exports: { local: exportsLocal.trim() || "0_EXPORTS", folder_id: exportsFolder.folder_id } } : {}),
+    };
+  }
+
   function body(): Record<string, unknown> {
     const b: Record<string, unknown> = {
       name: name.trim() || null,
@@ -387,7 +411,14 @@
     if (pwMode === "set" && password) b.password = password;
     if (pwMode === "clear") b.password = "";
     if (kind === "upload") {
-      if (!editing || (folder && (folder.folder_id !== up?.folder?.folder_id || folder.account_id !== up?.folder?.account_id))) b.folder = folder;
+      // The live-work sync rides inside `folder`, so the folder is sent whenever either changes.
+      const sync = syncPayload();
+      const syncChanged = JSON.stringify(sync) !== JSON.stringify(up?.folder?.sync ?? null);
+      const folderChanged = !editing || !!folder && (folder.folder_id !== up?.folder?.folder_id || folder.account_id !== up?.folder?.account_id);
+      if (folder && (folderChanged || syncChanged)) {
+        // Clearing the switch sends `sync: null`, which removes the block.
+        b.folder = { ...folder, ...(sync ? { sync } : up?.folder?.sync ? { sync: null } : {}) };
+      }
       b.uploader_fields_required = { name: askName, email: askEmail || otp, message: askMessage };
       b.allowed_extensions = allowedExtensions;
       b.max_file_size = maxSizeGb ? Math.round(parseFloat(maxSizeGb) * 1e9) : null;
@@ -416,6 +447,10 @@
     }
     if (pwMode === "set" && !password) {
       error = "Enter a password, or turn the password off.";
+      return;
+    }
+    if (kind === "upload" && syncOn && exportsFolder && (exportsLocal.trim() || "0_EXPORTS") === (driveLocal.trim() || "1_DRIVE")) {
+      error = "The client drive and exports need different local folders.";
       return;
     }
     saving = true;
@@ -805,6 +840,57 @@
                 <p class="text-xs text-faint">Writes a <span class="font-mono">.turbosort</span> marker into this folder. Project Zeus copies it to <span class="font-mono">Live_Work/{turbosort.trim() || "…"}/1_DRIVE</span>.</p>
               </div>
             </div>
+            <div class={line}>
+              <div class={label}>Live work</div>
+              <div class="grid gap-2">
+                <div class="flex items-center gap-3">
+                  <div class="min-w-0 flex-1">
+                    <b class="block font-medium text-text">Sync this project's folders with FioTransfer</b>
+                    <small class="block text-xs text-faint">The client's drive comes down, your exports go up</small>
+                  </div>
+                  <Switch bind:checked={syncOn} label="Sync this project's folders with FioTransfer" />
+                </div>
+                {#if syncOn}
+                  <p class="text-xs text-faint">Files are added in both directions. Nothing is ever deleted: you can clear Frame.io once you have your own copy.</p>
+                {/if}
+              </div>
+            </div>
+            {#if syncOn}
+              <div class={line}>
+                <div class={label}><label for="lc-sync-drive">Client drive</label></div>
+                <div class="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-2">
+                  <div class="grid gap-2 sm:grid-cols-2">
+                    <input id="lc-sync-drive" class={input} bind:value={driveLocal} placeholder="1_DRIVE" aria-label="Local folder for the client drive" autocomplete="off" spellcheck="false" />
+                    <FolderField bind:value={driveFolder} {recents} title="Download the client drive from" placeholder="This link's folder" chooseVerb="Use" />
+                  </div>
+                  <div class="text-xs text-faint">
+                    {#if driveFolder}
+                      Downloaded from <span class="font-mono">{crumbNames(driveFolder).at(-1) ?? "that folder"}</span> into <span class="font-mono">{driveLocal.trim() || "1_DRIVE"}</span>
+                      <button type="button" class="font-medium text-muted hover:text-text" onclick={() => (driveFolder = null)}>Use this link's folder</button>
+                    {:else}
+                      Downloaded from this link's folder into <span class="font-mono">{driveLocal.trim() || "1_DRIVE"}</span>
+                    {/if}
+                  </div>
+                </div>
+              </div>
+              <div class={line}>
+                <div class={label}><label for="lc-sync-exports">Exports</label></div>
+                <div class="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-2">
+                  <div class="grid gap-2 sm:grid-cols-2">
+                    <input id="lc-sync-exports" class={input} bind:value={exportsLocal} placeholder="0_EXPORTS" aria-label="Local folder for exports" autocomplete="off" spellcheck="false" />
+                    <FolderField bind:value={exportsFolder} {recents} title="Upload exports into" placeholder="None — no uploads" chooseVerb="Use" />
+                  </div>
+                  <div class="text-xs text-faint">
+                    {#if exportsFolder}
+                      Uploaded from <span class="font-mono">{exportsLocal.trim() || "0_EXPORTS"}</span> into <span class="font-mono">{crumbNames(exportsFolder).at(-1) ?? "that folder"}</span>
+                      <button type="button" class="font-medium text-muted hover:text-text" onclick={() => (exportsFolder = null)}>No uploads</button>
+                    {:else}
+                      Nothing is uploaded. Pick a folder to send <span class="font-mono">{exportsLocal.trim() || "0_EXPORTS"}</span> up to Frame.io
+                    {/if}
+                  </div>
+                </div>
+              </div>
+            {/if}
           {:else}
             <div class="{line} border-t-0 pt-1">
               <div class={label}><label for="lc-maxdl">Limit</label></div>
