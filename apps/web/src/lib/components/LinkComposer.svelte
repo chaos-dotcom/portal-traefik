@@ -834,10 +834,10 @@
               </div>
             </div>
             <div class={line}>
-              <div class={label}><label for="lc-zeus">Project Zeus</label></div>
+              <div class={label}><label for="lc-project-folder">Project Folder</label></div>
               <div class="grid gap-1.5">
-                <input id="lc-zeus" class={input} bind:value={turbosort} placeholder="Live_Work folder (leave empty for none)" autocomplete="off" />
-                <p class="text-xs text-faint">Writes a <span class="font-mono">.turbosort</span> marker into this folder. Project Zeus copies it to <span class="font-mono">Live_Work/{turbosort.trim() || "…"}/1_DRIVE</span>.</p>
+                <input id="lc-project-folder" class={input} bind:value={turbosort} placeholder="Live_Work folder (leave empty for none)" autocomplete="off" />
+                <p class="text-xs text-faint">The project's folder under <span class="font-mono">Live_Work</span>. FioTransfer reads it from Portal's API and keeps <span class="font-mono">1_DRIVE</span> and <span class="font-mono">0_EXPORTS</span> in step.</p>
               </div>
             </div>
             <div class={line}>

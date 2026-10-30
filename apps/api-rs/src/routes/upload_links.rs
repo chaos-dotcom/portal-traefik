@@ -77,14 +77,14 @@ fn str_or_none(v: Option<&Value>) -> Option<String> {
     if s.is_empty() { None } else { Some(s.to_string()) }
 }
 
-/// Project Zeus `.turbosort`: one Live_Work folder name, no path separators.
+/// The `.turbosort` value: one Live_Work project folder name, no path separators.
 fn clean_turbosort(value: &str) -> Result<String, Response> {
     let v = value.trim();
     if v.is_empty() {
-        return Err(detail(StatusCode::UNPROCESSABLE_ENTITY, "Project Zeus folder must not be empty"));
+        return Err(detail(StatusCode::UNPROCESSABLE_ENTITY, "Project folder must not be empty"));
     }
     if v == "." || v == ".." || v.contains('/') || v.contains('\\') || v.contains('\n') || v.contains('\r') {
-        return Err(detail(StatusCode::UNPROCESSABLE_ENTITY, "Project Zeus folder must be a single folder name"));
+        return Err(detail(StatusCode::UNPROCESSABLE_ENTITY, "Project folder must be a single folder name"));
     }
     Ok(v.to_string())
 }
@@ -176,14 +176,61 @@ fn destination_for(folder: &Value, target_folder_id: Option<&str>) -> Destinatio
     DestinationConfig::new(&t, data)
 }
 
-/// Write the Project Zeus marker into the link's Frame.io folder. The one broad sync rule carries
-/// it down to the NAS, where Project Zeus scans for it.
-async fn write_trigger(state: &AppState, dest: &DestinationConfig, content: &str) -> Result<(), Response> {
+/// The account and project a link's folder belongs to, as stored in the link's config. An empty
+/// value counts as absent: without both, Frame.io cannot be asked for the project's root folder.
+fn account_and_project(folder: &Value) -> Option<(String, String)> {
+    let get = |k: &str| -> Option<String> {
+        folder.get(k).and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty()).map(str::to_string)
+    };
+    Some((get("account_id")?, get("project_id")?))
+}
+
+/// Where the `.turbosort` marker belongs: the **root folder of the project**, not the folder the
+/// link writes uploads into. `None` when the root cannot be resolved — the caller then skips the
+/// marker and saves the link exactly as it would be without one.
+async fn trigger_destination(state: &AppState, folder: &Value) -> Option<DestinationConfig> {
+    let Some((account_id, project_id)) = account_and_project(folder) else {
+        tracing::warn!("upload_links.turbosort_root_unresolved: folder has no account_id/project_id");
+        return None;
+    };
+    let root = match state.frameio.get_project(&account_id, &project_id).await {
+        Ok(p) => p.root_folder_id,
+        Err(e) => {
+            tracing::warn!("upload_links.turbosort_root_unresolved: {e:?}");
+            return None;
+        }
+    };
+    match root.filter(|id| !id.trim().is_empty()) {
+        Some(root_folder_id) => Some(destination_for(folder, Some(&root_folder_id))),
+        None => {
+            tracing::warn!("upload_links.turbosort_root_unresolved: project {project_id} has no root_folder_id");
+            None
+        }
+    }
+}
+
+/// Write the `.turbosort` marker — one Live_Work folder name — into the project's **root folder**,
+/// where Zeus looks for it. The marker is legacy for Project Zeus, which still runs on the host and
+/// copies the folder to `Live_Work/…/1_DRIVE`; FioTransfer reads the same name from this API's
+/// `folder.turbosort` instead, so the marker is only kept while Zeus runs.
+///
+/// A write that fails never fails the link save: the stored `turbosort` value is what the client
+/// reads, and the marker is a convenience for the older consumer.
+async fn write_trigger(state: &AppState, folder: &Value, content: &str) {
+    let Some(dest) = trigger_destination(state, folder).await else { return };
     let backend = FrameioStorageBackend::new(state.frameio.clone());
-    backend.replace_turbosort(dest, content).await.map_err(|e| {
+    if let Err(e) = backend.replace_turbosort(&dest, content).await {
         tracing::warn!("upload_links.turbosort_write_failed: {e:?}");
-        detail(StatusCode::BAD_GATEWAY, "Could not write the Project Zeus marker to Frame.io")
-    })
+    }
+}
+
+/// Delete any `.turbosort` marker from the project's root folder. Best effort, like the write.
+async fn remove_trigger(state: &AppState, folder: &Value) {
+    let Some(dest) = trigger_destination(state, folder).await else { return };
+    let backend = FrameioStorageBackend::new(state.frameio.clone());
+    if let Err(e) = backend.remove_turbosort(&dest).await {
+        tracing::warn!("upload_links.turbosort_remove_failed: {e:?}");
+    }
 }
 
 /// The columns every admin view of an upload link reads.
@@ -342,15 +389,12 @@ pub async fn create_link(State(state): State<AppState>, admin: Admin, Json(body)
             Ok(v) => Some(v),
             Err(r) => return r,
         },
-        Some(_) => return detail(StatusCode::UNPROCESSABLE_ENTITY, "Project Zeus folder must be a string"),
+        Some(_) => return detail(StatusCode::UNPROCESSABLE_ENTITY, "Project folder must be a string"),
         None => None,
     };
     if let Some(ts) = &turbosort {
         folder["turbosort"] = json!(ts);
-        let dest = destination_for(&folder, None);
-        if let Err(r) = write_trigger(&state, &dest, ts).await {
-            return r;
-        }
+        write_trigger(&state, &folder, ts).await;
     }
     let token = generate_token();
     let inserted = sqlx::query(
@@ -394,7 +438,7 @@ pub async fn create_link(State(state): State<AppState>, admin: Admin, Json(body)
 }
 
 pub async fn update_link(State(state): State<AppState>, _: Admin, Path(id): Path<Uuid>, Json(body): Json<Map<String, Value>>) -> Response {
-    let raw = match sqlx::query("SELECT folder, target_folder_id FROM links WHERE id = $1")
+    let raw = match sqlx::query("SELECT folder FROM links WHERE id = $1")
         .bind(id)
         .fetch_optional(&state.db)
         .await
@@ -407,7 +451,6 @@ pub async fn update_link(State(state): State<AppState>, _: Admin, Path(id): Path
         }
     };
     let old_folder: Value = raw.get::<Option<Value>, _>("folder").unwrap_or(Value::Null);
-    let old_target: Option<String> = raw.get("target_folder_id");
     let old_trigger = turbosort_of(&old_folder);
 
     // `exclude_unset`: only keys present in the body are applied.
@@ -435,24 +478,17 @@ pub async fn update_link(State(state): State<AppState>, _: Admin, Path(id): Path
             Ok(v) => Some(Some(v)),
             Err(r) => return r,
         },
-        Some(_) => return detail(StatusCode::UNPROCESSABLE_ENTITY, "Project Zeus folder must be a string"),
+        Some(_) => return detail(StatusCode::UNPROCESSABLE_ENTITY, "Project folder must be a string"),
         None => None,
     };
     let new_trigger = trigger_change.clone().unwrap_or_else(|| old_trigger.clone());
 
     if folder_changed || trigger_change.is_some() {
         if old_trigger.is_some() {
-            let backend = FrameioStorageBackend::new(state.frameio.clone());
-            let old_dest = destination_for(&old_folder, old_target.as_deref());
-            if let Err(e) = backend.remove_turbosort(&old_dest).await {
-                tracing::warn!("upload_links.turbosort_remove_failed: {e:?}");
-            }
+            remove_trigger(&state, &old_folder).await;
         }
         if let Some(new) = &new_trigger {
-            let new_dest = destination_for(&new_folder, if folder_changed { None } else { old_target.as_deref() });
-            if let Err(r) = write_trigger(&state, &new_dest, new).await {
-                return r;
-            }
+            write_trigger(&state, &new_folder, new).await;
         }
         if let Some(obj) = new_folder.as_object_mut() {
             match &new_trigger {
@@ -556,7 +592,7 @@ pub async fn restore_link(State(state): State<AppState>, admin: Admin, Path(id):
 }
 
 pub async fn delete_link(State(state): State<AppState>, admin: Admin, Path(id): Path<Uuid>) -> Response {
-    let raw = match sqlx::query("SELECT folder, target_folder_id FROM links WHERE id = $1")
+    let raw = match sqlx::query("SELECT folder FROM links WHERE id = $1")
         .bind(id)
         .fetch_optional(&state.db)
         .await
@@ -569,13 +605,8 @@ pub async fn delete_link(State(state): State<AppState>, admin: Admin, Path(id): 
         }
     };
     let folder: Value = raw.get::<Option<Value>, _>("folder").unwrap_or(Value::Null);
-    let target: Option<String> = raw.get("target_folder_id");
     if turbosort_of(&folder).is_some() {
-        let backend = FrameioStorageBackend::new(state.frameio.clone());
-        let dest = destination_for(&folder, target.as_deref());
-        if let Err(e) = backend.remove_turbosort(&dest).await {
-            tracing::warn!("upload_links.turbosort_remove_failed: {e:?}");
-        }
+        remove_trigger(&state, &folder).await;
     }
     let _ = sqlx::query("DELETE FROM links WHERE id = $1").bind(id).execute(&state.db).await;
     let _ = sqlx::query("INSERT INTO audit_log (user_id, action, detail) VALUES ($1,'upload_link.deleted',$2)")
@@ -753,6 +784,31 @@ mod tests {
             validate_sync(Some(&json!({ "mode": "mirror", "drive": { "local": "1_DRIVE" } }))),
             Err("sync.mode must be one of ['add_only']".to_string())
         );
+    }
+
+    #[test]
+    fn marker_goes_to_the_projects_root_folder_not_the_links_folder() {
+        let folder = json!({
+            "type": "frameio",
+            "account_id": "a1",
+            "workspace_id": "w1",
+            "project_id": "p1",
+            "folder_id": "f1",
+            "folder_name": "Day 3",
+        });
+        // The project — not the folder uploads land in — is what Frame.io is asked about.
+        assert_eq!(
+            account_and_project(&folder),
+            Some(("a1".to_string(), "p1".to_string()))
+        );
+        // With the root folder id from `get_project`, the marker destination is that root.
+        let dest = destination_for(&folder, Some("root-9"));
+        assert_eq!(dest.require("account_id"), Ok("a1".to_string()));
+        assert_eq!(dest.require("folder_id"), Ok("root-9".to_string()));
+        // Nothing to resolve without both ids: the marker is skipped, the link still saves.
+        assert_eq!(account_and_project(&json!({ "project_id": "p1" })), None);
+        assert_eq!(account_and_project(&json!({ "account_id": "a1", "project_id": "  " })), None);
+        assert_eq!(account_and_project(&json!({ "account_id": " a1 ", "project_id": "p1" })), Some(("a1".to_string(), "p1".to_string())));
     }
 
     #[test]
