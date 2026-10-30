@@ -1015,8 +1015,8 @@
               <div class={label}>Project Folder</div>
               <div class="flex items-center gap-3">
                 <div class="min-w-0 flex-1">
-                  <b class="block font-medium text-text">Smart In/Out Tray</b>
-                  <small class="block text-xs text-faint">Inbound: the client's drive comes down. Outbound: your exports go up.</small>
+                  <b class="block font-medium text-text">Sync this project's folders with FioTransfer</b>
+                  <small class="block text-xs text-faint">The client's drive comes down, your exports go up</small>
                 </div>
                 <Switch bind:checked={syncOn} label="Sync this project's folders with FioTransfer" />
               </div>
@@ -1046,7 +1046,7 @@
                   </p>
                 {/if}
                 <div class={line}>
-                  <div class={label}><label for="lc-sync-drive">Client drive (In Tray)</label></div>
+                  <div class={label}><label for="lc-sync-drive">Client drive</label></div>
                   <div class="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-2">
                     <div class="grid gap-2 sm:grid-cols-2">
                       <select id="lc-sync-drive" class="{input} max-w-none" value={driveFolder?.folder_id ?? ""} disabled={loadingFolders} onchange={(e) => pickSide("drive", e.currentTarget.value)}>
@@ -1094,7 +1094,7 @@
                   </div>
                 </div>
                 <div class={line}>
-                  <div class={label}><label for="lc-sync-exports">Exports (Out Tray)</label></div>
+                  <div class={label}><label for="lc-sync-exports">Exports</label></div>
                   <div class="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-2">
                     <div class="grid gap-2 sm:grid-cols-2">
                       <select id="lc-sync-exports" class="{input} max-w-none" value={exportsFolder?.folder_id ?? ""} disabled={loadingFolders} onchange={(e) => pickSide("exports", e.currentTarget.value)}>
