@@ -14,9 +14,6 @@ use crate::storage::{
 
 const SYNC_TRIGGER_EVENTS: [&str; 2] = ["file.ready", "file.upload.completed"];
 
-/// Project Zeus reads this marker file to know which Live_Work folder a project belongs to.
-pub const TURBOSORT_FILE: &str = ".turbosort";
-
 fn split_path(path: &str) -> Result<(Vec<String>, String), String> {
     let parts: Vec<String> = path
         .replace('\\', "/")
@@ -205,30 +202,6 @@ impl FrameioStorageBackend {
         let account_id = dest.require("account_id").map_err(FrameioError::Other)?;
         let url = self.client.get_download_url(&account_id, file_id).await?;
         Ok(DownloadURL { url })
-    }
-
-    /// Replace the Project Zeus marker in the destination folder: delete earlier ones, then write
-    /// the new Live_Work folder name. Frame.io accepts the marker like any other file; the one
-    /// broad sync rule carries it down to the NAS.
-    pub async fn replace_turbosort(&self, dest: &DestinationConfig, content: &str) -> Result<(), FrameioError> {
-        self.remove_turbosort(dest).await?;
-        let account_id = dest.require("account_id").map_err(FrameioError::Other)?;
-        let folder_id = dest.require("folder_id").map_err(FrameioError::Other)?;
-        self.client
-            .upload_bytes(&account_id, &folder_id, TURBOSORT_FILE, content.as_bytes())
-            .await?;
-        Ok(())
-    }
-
-    /// Delete any Project Zeus marker in the destination folder.
-    pub async fn remove_turbosort(&self, dest: &DestinationConfig) -> Result<(), FrameioError> {
-        let account_id = dest.require("account_id").map_err(FrameioError::Other)?;
-        for file in self.list_files_in_destination(dest).await? {
-            if file.name == TURBOSORT_FILE {
-                self.client.delete_file(&account_id, &file.id).await?;
-            }
-        }
-        Ok(())
     }
 
     pub async fn subscribe_to_changes(

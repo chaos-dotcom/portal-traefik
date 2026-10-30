@@ -48,10 +48,10 @@ curl -X POST https://portal.example.com/api/upload-links \
 
 The response includes `public_url` (the client-facing link) and `turbosort`.
 
-`turbosort` is optional. When set, Portal writes a `.turbosort` marker into the link's Frame.io
-folder with that value; Project Zeus reads it and copies the folder to
-`Live_Work/<value>/1_DRIVE`. Changing the field rewrites the marker; sending `null` or deleting
-the link removes it.
+`turbosort` is optional. When set, it names the project's folder under the user's root;
+FioTransfer reads it from `GET /api/upload-links` and names the folder
+`Live_Work/<value>/1_DRIVE`. Portal writes nothing into Frame.io for it. Sending `null` clears the
+field.
 
 ## Other resources
 
