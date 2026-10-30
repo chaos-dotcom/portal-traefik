@@ -847,15 +847,15 @@
               </div>
             </div>
             <div class={line}>
-              <div class={label}><label for="lc-project-folder">Live_Work folder</label></div>
+              <div class={label}><label for="lc-project-folder">Local folder</label></div>
               <div class="grid gap-1.5">
-                <input id="lc-project-folder" class="{input} disabled:opacity-40" list="lc-project-folders" bind:value={turbosort} placeholder="Live_Work folder (leave empty for none)" autocomplete="off" disabled={!syncOn} />
+                <input id="lc-project-folder" class="{input} disabled:opacity-40" list="lc-project-folders" bind:value={turbosort} placeholder="Your project folder (leave empty for none)" autocomplete="off" disabled={!syncOn} />
                 <datalist id="lc-project-folders">
                   {#each projectFolders as f (f)}
                     <option value={f}></option>
                   {/each}
                 </datalist>
-                <p class="text-xs text-faint">The <span class="font-mono">Live_Work</span> folder this project belongs to: pick one already in use, or type a new name. FioTransfer reads that name from Portal and keeps <span class="font-mono">1_DRIVE</span> and <span class="font-mono">0_EXPORTS</span> in step.</p>
+                <p class="text-xs text-faint">The folder this project lives in on your machine: pick one already in use, or type a new name. FioTransfer reads it from Portal and keeps <span class="font-mono">1_DRIVE</span> and <span class="font-mono">0_EXPORTS</span> in step.</p>
               </div>
             </div>
             {#if syncOn}
