@@ -44,13 +44,13 @@ type LinkBase = {
 
 export type UploadLink = LinkBase & {
   kind: "upload";
-  // Where uploads land; also carries the Project Zeus marker and the optional live-work `sync`.
+  // Where uploads land; also carries the optional live-work `sync`.
   folder: FolderRef | null;
   max_file_size: number | null;
   allowed_extensions: string[] | null;
   uploader_fields_required: { name: boolean; email: boolean; message: boolean };
   subfolder_template: string | null;
-  // Project Zeus: the Live_Work folder this link's uploads belong to (null = no marker).
+  // The project folder name FioTransfer reads and uses for the project's folder (null = none).
   turbosort: string | null;
 };
 

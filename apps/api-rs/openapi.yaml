@@ -124,7 +124,7 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
     patch:
       summary: Update an upload link
-      description: Only keys present in the body are applied. Send `turbosort` as null to remove the Project Zeus marker.
+      description: Only keys present in the body are applied. Send `turbosort` as null to clear the project folder name.
       requestBody:
         required: true
         content:
@@ -139,7 +139,7 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "422": { $ref: "#/components/responses/ValidationError" }
     delete:
-      summary: Delete an upload link and its Project Zeus marker
+      summary: Delete an upload link
       responses:
         "204": { description: Deleted }
         "404": { $ref: "#/components/responses/NotFound" }
@@ -424,7 +424,7 @@ components:
         turbosort:
           type: string
           nullable: true
-          description: Project Zeus Live_Work folder name. Writes a .turbosort marker into the folder.
+          description: Project folder name under the user's root. FioTransfer reads it from `GET /api/upload-links`; Portal writes nothing into Frame.io for it.
         expires_at: { type: string, format: date-time, nullable: true }
         password: { type: string, nullable: true }
         verify_email: { type: boolean, default: false }

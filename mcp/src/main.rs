@@ -91,14 +91,14 @@ struct LinkId {
 #[derive(Debug, Deserialize, JsonSchema)]
 struct UpdateLink {
     link_id: String,
-    /// Fields to PATCH. Only supplied keys change; `turbosort: null` clears the marker.
+    /// Fields to PATCH. Only supplied keys change; `turbosort: null` clears the project folder name.
     fields: Value,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct SetProjectZeus {
     link_id: String,
-    /// Live_Work folder name, or null to remove the marker.
+    /// Project folder name, or null to clear it.
     livework_folder: Option<String>,
 }
 
@@ -109,7 +109,7 @@ struct CreateUploadLink {
     workspace_id: String,
     project_id: String,
     folder_id: String,
-    /// Project Zeus Live_Work folder name; writes a .turbosort marker into the folder.
+    /// Project folder name under the user's root; FioTransfer reads it from `GET /api/upload-links`.
     turbosort: Option<String>,
     /// RFC 3339 timestamp.
     expires_at: Option<String>,
@@ -231,7 +231,7 @@ impl PortalServer {
         )
     }
 
-    #[tool(description = "Delete an upload link and its Project Zeus marker.")]
+    #[tool(description = "Delete an upload link.")]
     async fn delete_upload_link(&self, Parameters(LinkId { link_id }): Parameters<LinkId>) -> Result<String, ErrorData> {
         pretty(self.call(reqwest::Method::DELETE, &format!("/api/upload-links/{link_id}"), None, &[]).await?)
     }
@@ -334,7 +334,7 @@ impl PortalServer {
         )
     }
 
-    #[tool(description = "List files in a Frame.io folder, including the .turbosort marker.")]
+    #[tool(description = "List files in a Frame.io folder.")]
     async fn list_frameio_files(
         &self,
         Parameters(Folder { account_id, folder_id }): Parameters<Folder>,
