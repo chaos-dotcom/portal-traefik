@@ -48,6 +48,7 @@
     link = null,
     recents = [],
     rules = [],
+    projectFolders = [],
     branding,
     initialFolder = null,
     openSourcePicker = false,
@@ -61,6 +62,8 @@
     link?: UploadLink | DownloadLink | null;
     recents?: FolderRef[];
     rules?: RuleLike[];
+    /** Live_Work folder names already in use, for the project-folder drop-down. */
+    projectFolders?: string[];
     branding: Branding;
     initialFolder?: FolderRef | null;
     openSourcePicker?: boolean;
@@ -834,25 +837,25 @@
               </div>
             </div>
             <div class={line}>
-              <div class={label}><label for="lc-project-folder">Project Folder</label></div>
-              <div class="grid gap-1.5">
-                <input id="lc-project-folder" class={input} bind:value={turbosort} placeholder="Live_Work folder (leave empty for none)" autocomplete="off" />
-                <p class="text-xs text-faint">The project's folder under <span class="font-mono">Live_Work</span>. FioTransfer reads it from Portal's API and keeps <span class="font-mono">1_DRIVE</span> and <span class="font-mono">0_EXPORTS</span> in step.</p>
+              <div class={label}>Project Folder</div>
+              <div class="flex items-center gap-3">
+                <div class="min-w-0 flex-1">
+                  <b class="block font-medium text-text">Sync this project's folders with FioTransfer</b>
+                  <small class="block text-xs text-faint">The client's drive comes down, your exports go up</small>
+                </div>
+                <Switch bind:checked={syncOn} label="Sync this project's folders with FioTransfer" />
               </div>
             </div>
             <div class={line}>
-              <div class={label}>Live work</div>
-              <div class="grid gap-2">
-                <div class="flex items-center gap-3">
-                  <div class="min-w-0 flex-1">
-                    <b class="block font-medium text-text">Sync this project's folders with FioTransfer</b>
-                    <small class="block text-xs text-faint">The client's drive comes down, your exports go up</small>
-                  </div>
-                  <Switch bind:checked={syncOn} label="Sync this project's folders with FioTransfer" />
-                </div>
-                {#if syncOn}
-                  <p class="text-xs text-faint">Files are added in both directions. Nothing is ever deleted: you can clear Frame.io once you have your own copy.</p>
-                {/if}
+              <div class={label}><label for="lc-project-folder">Live_Work folder</label></div>
+              <div class="grid gap-1.5">
+                <input id="lc-project-folder" class="{input} disabled:opacity-40" list="lc-project-folders" bind:value={turbosort} placeholder="Live_Work folder (leave empty for none)" autocomplete="off" disabled={!syncOn} />
+                <datalist id="lc-project-folders">
+                  {#each projectFolders as f (f)}
+                    <option value={f}></option>
+                  {/each}
+                </datalist>
+                <p class="text-xs text-faint">The <span class="font-mono">Live_Work</span> folder this project belongs to: pick one already in use, or type a new name. FioTransfer reads that name from Portal and keeps <span class="font-mono">1_DRIVE</span> and <span class="font-mono">0_EXPORTS</span> in step.</p>
               </div>
             </div>
             {#if syncOn}
@@ -889,6 +892,10 @@
                     {/if}
                   </div>
                 </div>
+              </div>
+              <div class="{line} border-t-0 pt-1">
+                <div></div>
+                <p class="text-xs text-faint">Files are added in both directions. Nothing is ever deleted: you can clear Frame.io once you have your own copy.</p>
               </div>
             {/if}
           {:else}
