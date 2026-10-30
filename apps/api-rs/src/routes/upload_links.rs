@@ -125,6 +125,10 @@ fn sync_folder_id(side: &str, value: &str) -> Result<String, String> {
 /// Validate `folder.sync` and return it as stored. `None` means the link has no sync: the key was
 /// absent or null. Absent `folder_id`s stay absent — the consumer reads them as "the link's own
 /// folder". `mode` is stored explicitly so the client never has to guess.
+///
+/// The two sides are independent switches in the composer, so either may be sent on its own:
+/// `drive` alone is a link that only downloads the client's drive, `exports` alone is a link that
+/// only uploads. A block with neither is not a sync at all and is rejected.
 pub fn validate_sync(raw: Option<&Value>) -> Result<Option<Value>, String> {
     let Some(raw) = raw.filter(|v| !v.is_null()) else { return Ok(None) };
     let Some(obj) = raw.as_object() else { return Err("sync must be an object".to_string()) };
@@ -147,16 +151,22 @@ pub fn validate_sync(raw: Option<&Value>) -> Result<Option<Value>, String> {
         }
         Ok(Some(Value::Object(out)))
     };
-    // The client's drive is what the link is for: without it there is nothing to download.
-    let drive = side("drive")?.ok_or_else(|| "sync.drive is required".to_string())?;
+    // At least one side has to be there: a sync block with neither lane does nothing.
+    let drive = side("drive")?;
     let exports = side("exports")?;
-    if let Some(exp) = &exports
+    if drive.is_none() && exports.is_none() {
+        return Err("sync needs at least one of drive or exports".to_string());
+    }
+    // The two local folders must be different — but only when both sides are stored.
+    if let (Some(drive), Some(exp)) = (&drive, &exports)
         && exp.get("local") == drive.get("local") {
             return Err("sync.drive.local and sync.exports.local must be different folders".to_string());
         }
     let mut out = Map::new();
     out.insert("mode".to_string(), json!(mode));
-    out.insert("drive".to_string(), drive);
+    if let Some(drive) = drive {
+        out.insert("drive".to_string(), drive);
+    }
     if let Some(exp) = exports {
         out.insert("exports".to_string(), exp);
     }
@@ -690,7 +700,10 @@ mod tests {
     #[test]
     fn sync_shape_and_mode_errors_name_what_is_accepted() {
         assert_eq!(validate_sync(Some(&json!("add_only"))), Err("sync must be an object".to_string()));
-        assert_eq!(validate_sync(Some(&json!({}))), Err("sync.drive is required".to_string()));
+        assert_eq!(
+            validate_sync(Some(&json!({}))),
+            Err("sync needs at least one of drive or exports".to_string())
+        );
         assert_eq!(
             validate_sync(Some(&json!({ "drive": "1_DRIVE" }))),
             Err("sync.drive must be an object".to_string())
@@ -706,6 +719,44 @@ mod tests {
     }
 
     #[test]
+    fn sync_takes_either_side_on_its_own() {
+        // Exports alone: a link that only uploads. No `drive` key is invented.
+        let raw = json!({ "exports": { "local": " 0_EXPORTS " } });
+        assert_eq!(
+            validate_sync(Some(&raw)),
+            Ok(Some(json!({ "mode": "add_only", "exports": { "local": "0_EXPORTS" } })))
+        );
+        let raw = json!({ "mode": "add_only", "exports": { "local": "0_EXPORTS", "folder_id": "6f4121b3-628d-4b7a-91ea-8b1ac4a3f0a3" } });
+        assert_eq!(
+            validate_sync(Some(&raw)),
+            Ok(Some(json!({
+                "mode": "add_only",
+                "exports": { "local": "0_EXPORTS", "folder_id": "6f4121b3-628d-4b7a-91ea-8b1ac4a3f0a3" },
+            })))
+        );
+        // Drive alone is still what it was.
+        assert_eq!(
+            validate_sync(Some(&json!({ "drive": { "local": "1_DRIVE" } }))),
+            Ok(Some(json!({ "mode": "add_only", "drive": { "local": "1_DRIVE" } })))
+        );
+        // A null side is no side.
+        let raw = json!({ "drive": null, "exports": { "local": "0_EXPORTS" } });
+        assert_eq!(
+            validate_sync(Some(&raw)),
+            Ok(Some(json!({ "mode": "add_only", "exports": { "local": "0_EXPORTS" } })))
+        );
+        // Neither side is not a sync, and says so.
+        assert_eq!(
+            validate_sync(Some(&json!({ "mode": "add_only" }))),
+            Err("sync needs at least one of drive or exports".to_string())
+        );
+        assert_eq!(
+            validate_sync(Some(&json!({ "drive": null, "exports": null }))),
+            Err("sync needs at least one of drive or exports".to_string())
+        );
+    }
+
+    #[test]
     fn sync_sides_must_name_different_local_folders() {
         let raw = json!({
             "drive": { "local": "1_DRIVE" },
@@ -714,6 +765,12 @@ mod tests {
         assert_eq!(
             validate_sync(Some(&raw)),
             Err("sync.drive.local and sync.exports.local must be different folders".to_string())
+        );
+        // The rule only bites when both sides are stored: one side may be named anything.
+        let raw = json!({ "exports": { "local": "1_DRIVE" } });
+        assert_eq!(
+            validate_sync(Some(&raw)),
+            Ok(Some(json!({ "mode": "add_only", "exports": { "local": "1_DRIVE" } })))
         );
     }
 }

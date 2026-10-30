@@ -11,8 +11,9 @@ export type LinkState = "ok" | "expired" | "revoked";
  * Per-link "sync to live work", stored inside an upload link's `folder` JSON.
  *
  * `drive` is the client's drop folder: FioTransfer downloads it into the local folder named
- * `local`. `exports` is ours: the local folder named `local` is uploaded into it, and leaving it
- * out means no uploads. An omitted `folder_id` means "the link's own folder".
+ * `local`. `exports` is ours: the local folder named `local` is uploaded into it. Either side may
+ * be left out — that lane is simply off — but a `sync` with neither is not a sync. An omitted
+ * `folder_id` means "the link's own folder".
  *
  * `add_only` is the whole rule: files are added in both directions and nothing is ever deleted, so
  * Frame.io can be cleared once the local copy exists.
@@ -20,7 +21,7 @@ export type LinkState = "ok" | "expired" | "revoked";
 export type LiveWorkSyncFolder = { local: string; folder_id?: string | null };
 export type LiveWorkSync = {
   mode?: "add_only";
-  drive: LiveWorkSyncFolder;
+  drive?: LiveWorkSyncFolder | null;
   exports?: LiveWorkSyncFolder | null;
 };
 

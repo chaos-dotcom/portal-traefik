@@ -102,6 +102,9 @@
   let driveLocal = $state("1_DRIVE");
   let exportsLocal = $state("0_EXPORTS");
   let driveFolder = $state<FolderRef | null>(null);
+  // The inbound lane. A new link brings the client's drive down (the owner's ask), and an existing
+  // link follows what it stores: `drive` present means the switch is on.
+  let importsOn = $state(true);
   // The outbound lane. A new link has one (the owner's ask: exports unless he says otherwise), and
   // it points at the link's own folder until a child of the project is chosen. An existing link
   // follows what it stores: `exports` present means the switch is on.
@@ -185,6 +188,9 @@
         // An existing link is shown as it was saved: no `exports` keeps the switch off, so editing
         // it never adds an upload lane the link deliberately did not have.
         exportsOn = !!s?.exports;
+        // Same for the inbound lane: no `drive` keeps the switch off, so editing it never starts
+        // downloading a drive the link deliberately did not have.
+        importsOn = !!s?.drive;
       } else {
         const s = link.source;
         source = { source: s as DownloadSource, label: (s.label as string) ?? sourceSummary(s), path: (s.path as FolderRef["path"]) ?? [], count: null, bytes: (s.bytes as number) ?? null };
@@ -426,12 +432,12 @@
 
   /**
    * The defaults stay `1_DRIVE` and `0_EXPORTS`: on a link with no id for a side, a child already
-   * named so is preselected. A row the user has touched is left alone. Exports that are off, or
-   * have no such child, stay on the link's own folder.
+   * named so is preselected. A row the user has touched is left alone. A side whose switch is off,
+   * or that has no such child, stays on the link's own folder.
    */
   function preselectByName() {
     if (!children?.length) return;
-    if (!driveFolder && !touched.drive) {
+    if (importsOn && !driveFolder && !touched.drive) {
       const c = children.find((x) => x.name === (driveLocal.trim() || "1_DRIVE"));
       if (c) selectSide("drive", c.id);
     }
@@ -577,9 +583,11 @@
     if (!syncOn) return null;
     return {
       mode: "add_only",
-      // No folder picked means the link's own folder, on either side.
-      drive: { local: driveLocal.trim() || "1_DRIVE", ...(driveFolder ? { folder_id: driveFolder.folder_id } : {}) },
-      // An unticked box is no outbound lane at all: the key is absent, which the API stores as none.
+      // An unticked box is no lane at all on that side: the key is absent, which the API stores as
+      // none. No folder picked means the link's own folder, on either side.
+      ...(importsOn
+        ? { drive: { local: driveLocal.trim() || "1_DRIVE", ...(driveFolder ? { folder_id: driveFolder.folder_id } : {}) } }
+        : {}),
       ...(exportsOn
         ? { exports: { local: exportsLocal.trim() || "0_EXPORTS", ...(exportsFolder ? { folder_id: exportsFolder.folder_id } : {}) } }
         : {}),
@@ -638,7 +646,7 @@
       error = "Enter a password, or turn the password off.";
       return;
     }
-    if (kind === "upload" && syncOn && exportsOn && (exportsLocal.trim() || "0_EXPORTS") === (driveLocal.trim() || "1_DRIVE")) {
+    if (kind === "upload" && syncOn && importsOn && exportsOn && (exportsLocal.trim() || "0_EXPORTS") === (driveLocal.trim() || "1_DRIVE")) {
       error = "The client drive and exports need different local folders.";
       return;
     }
@@ -1059,49 +1067,60 @@
                 <div class={line}>
                   <div class={label}><label for="lc-sync-drive">Imports</label></div>
                   <div class="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-2">
-                    <div class="grid gap-2 sm:grid-cols-2">
-                      <select id="lc-sync-drive" class="{input} max-w-none" value={driveFolder?.folder_id ?? ""} disabled={loadingFolders} onchange={(e) => pickSide("drive", e.currentTarget.value)}>
-                        {#if loadingFolders && !children}
-                          <option value="">Loading the project's folders…</option>
-                        {:else}
-                          <option value="">This link's folder</option>
-                          {#each sideOptions("drive") as c (c.id)}<option value={c.id}>{c.name}</option>{/each}
-                        {/if}
-                      </select>
-                      <input class={input} bind:value={driveLocal} placeholder="1_DRIVE" aria-label="Local folder for the client drive" autocomplete="off" spellcheck="false" />
+                    <div class="flex min-w-0 items-center gap-3">
+                      <div class="min-w-0 flex-1">
+                        <b class="block font-medium text-text">Download imports</b>
+                        <small class="block text-xs text-faint">The client's drive comes down to your machine</small>
+                      </div>
+                      <Switch id="lc-sync-imports-on" bind:checked={importsOn} label="Download imports" />
                     </div>
-                    <div class="flex min-w-0 flex-wrap items-center gap-1.5">
-                      <input
-                        class="{input} max-w-56"
-                        bind:value={newName.drive}
-                        placeholder="or type a new folder name"
-                        aria-label="New folder name for the client drive"
-                        autocomplete="off"
-                        spellcheck="false"
-                        onkeydown={(e) => {
-                          if (e.key === "Enter") {
-                            e.preventDefault();
-                            void createSideFolder("drive");
-                          }
-                        }}
-                      />
-                      <button type="button" class="h-8 rounded-md border border-border px-3 font-medium text-text hover:bg-surface-3 disabled:cursor-default disabled:opacity-40" disabled={!cleanFolderName(newName.drive) || !!creating} onclick={() => createSideFolder("drive")}>
-                        {creating === "drive" ? "Creating…" : "Create"}
-                      </button>
-                    </div>
-                    {#if newName.drive.trim() && !cleanFolderName(newName.drive)}
-                      <div class="text-xs text-danger">{FOLDER_NAME_RULE}</div>
-                    {/if}
-                    {#if createIssue?.side === "drive"}
-                      <div class="text-xs text-danger">{createIssue.message}</div>
-                    {/if}
-                    <div class="text-xs text-faint">
-                      {#if driveFolder}
-                        Downloaded from <span class="font-mono">{syncRoot?.name ?? "the project"} / {driveFolder.folder_name || "that folder"}</span> into <span class="font-mono">{driveLocal.trim() || "1_DRIVE"}</span>
-                      {:else}
-                        Downloaded from this link's folder into <span class="font-mono">{driveLocal.trim() || "1_DRIVE"}</span>
+                    {#if importsOn}
+                      <div class="grid gap-2 sm:grid-cols-2">
+                        <select id="lc-sync-drive" class="{input} max-w-none" value={driveFolder?.folder_id ?? ""} disabled={loadingFolders} onchange={(e) => pickSide("drive", e.currentTarget.value)}>
+                          {#if loadingFolders && !children}
+                            <option value="">Loading the project's folders…</option>
+                          {:else}
+                            <option value="">This link's folder</option>
+                            {#each sideOptions("drive") as c (c.id)}<option value={c.id}>{c.name}</option>{/each}
+                          {/if}
+                        </select>
+                        <input class={input} bind:value={driveLocal} placeholder="1_DRIVE" aria-label="Local folder for the client drive" autocomplete="off" spellcheck="false" />
+                      </div>
+                      <div class="flex min-w-0 flex-wrap items-center gap-1.5">
+                        <input
+                          class="{input} max-w-56"
+                          bind:value={newName.drive}
+                          placeholder="or type a new folder name"
+                          aria-label="New folder name for the client drive"
+                          autocomplete="off"
+                          spellcheck="false"
+                          onkeydown={(e) => {
+                            if (e.key === "Enter") {
+                              e.preventDefault();
+                              void createSideFolder("drive");
+                            }
+                          }}
+                        />
+                        <button type="button" class="h-8 rounded-md border border-border px-3 font-medium text-text hover:bg-surface-3 disabled:cursor-default disabled:opacity-40" disabled={!cleanFolderName(newName.drive) || !!creating} onclick={() => createSideFolder("drive")}>
+                          {creating === "drive" ? "Creating…" : "Create"}
+                        </button>
+                      </div>
+                      {#if newName.drive.trim() && !cleanFolderName(newName.drive)}
+                        <div class="text-xs text-danger">{FOLDER_NAME_RULE}</div>
                       {/if}
-                    </div>
+                      {#if createIssue?.side === "drive"}
+                        <div class="text-xs text-danger">{createIssue.message}</div>
+                      {/if}
+                      <div class="text-xs text-faint">
+                        {#if driveFolder}
+                          Downloaded from <span class="font-mono">{syncRoot?.name ?? "the project"} / {driveFolder.folder_name || "that folder"}</span> into <span class="font-mono">{driveLocal.trim() || "1_DRIVE"}</span>
+                        {:else}
+                          Downloaded from this link's folder into <span class="font-mono">{driveLocal.trim() || "1_DRIVE"}</span>
+                        {/if}
+                      </div>
+                    {:else}
+                      <p class="text-xs text-faint">Nothing is downloaded. Turn on <span class="font-medium text-muted">Imports</span> to bring the client's drive down into <span class="font-mono">{driveLocal.trim() || "1_DRIVE"}</span>.</p>
+                    {/if}
                   </div>
                 </div>
                 <div class={line}>
