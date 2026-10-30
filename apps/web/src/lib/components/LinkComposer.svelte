@@ -379,6 +379,13 @@
     selectSide(side, id);
   }
 
+  /**
+   * Both lanes on, and neither side names a folder: both would target this link's own folder.
+   * The API takes it, but FioTransfer will not mix imports and exports in one Frame.io folder, so
+   * the exports lane is skipped: say so here, before the link is saved, not later in the app.
+   */
+  const lanesCollide = $derived(syncOn && importsOn && exportsOn && !driveFolder && !exportsFolder && !loadingFolders);
+
   /** The sync validator's rule for a local folder name, applied before we ask Frame.io for one. */
   function cleanFolderName(raw: string): string | null {
     const v = raw.trim();
@@ -434,6 +441,9 @@
    * The defaults stay `1_DRIVE` and `0_EXPORTS`: on a link with no id for a side, a child already
    * named so is preselected. A row the user has touched is left alone. A side whose switch is off,
    * or that has no such child, stays on the link's own folder.
+   *
+   * This runs when the level is read, and again when a side is switched on: a lane added to an
+   * existing link points at its folder the moment it appears, not only on an untouched new link.
    */
   function preselectByName() {
     if (!children?.length) return;
@@ -1072,7 +1082,7 @@
                         <b class="block font-medium text-text">Download imports</b>
                         <small class="block text-xs text-faint">The client's drive comes down to your machine</small>
                       </div>
-                      <Switch id="lc-sync-imports-on" bind:checked={importsOn} label="Download imports" />
+                      <Switch id="lc-sync-imports-on" bind:checked={importsOn} label="Download imports" onchange={(on) => on && preselectByName()} />
                     </div>
                     {#if importsOn}
                       <div class="grid gap-2 sm:grid-cols-2">
@@ -1131,7 +1141,7 @@
                         <b class="block font-medium text-text">Upload exports</b>
                         <small class="block text-xs text-faint">Your exports go up to Frame.io</small>
                       </div>
-                      <Switch id="lc-sync-exports-on" bind:checked={exportsOn} label="Upload exports" />
+                      <Switch id="lc-sync-exports-on" bind:checked={exportsOn} label="Upload exports" onchange={(on) => on && preselectByName()} />
                     </div>
                     {#if exportsOn}
                       <div class="grid gap-2 sm:grid-cols-2">
@@ -1169,6 +1179,9 @@
                       {/if}
                       {#if createIssue?.side === "exports"}
                         <div class="text-xs text-danger">{createIssue.message}</div>
+                      {/if}
+                      {#if lanesCollide}
+                        <div class="text-xs text-danger">Pick the exports folder: the link's own folder is already where imports come from.</div>
                       {/if}
                       <div class="text-xs text-faint">
                         {#if exportsFolder}
