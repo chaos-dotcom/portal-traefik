@@ -158,6 +158,19 @@ export const search = (account: string, q: string) =>
 export const resolvePath = (account: string, folder: string) =>
   getJSON<ResolvedPath>(`/api/frameio/path?account_id=${encodeURIComponent(account)}&folder_id=${encodeURIComponent(folder)}`);
 
+export async function createProject(account: string, workspace: string, name: string): Promise<ProjectItem> {
+  const res = await fetch("/api/frameio/projects", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ account_id: account, workspace_id: workspace, name }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new FrameioApiError(body.detail ?? `Could not create the project (${res.status})`, res.status);
+  }
+  return res.json();
+}
+
 export async function createFolder(account: string, parent: string, name: string): Promise<Named> {
   const res = await fetch("/api/frameio/folders", {
     method: "POST",
